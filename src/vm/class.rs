@@ -1,28 +1,37 @@
-use crate::vm::class::attribute::Attribute;
-use std::any::Any;
+use crate::vm::class::attribute::{Attribute};
 use crate::vm::class::constant::Constant;
 use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
+use std::collections::HashMap;
 
-pub struct ClassFile {
-    pub(crate) magic: u32,
-    pub(crate) minor_version: u16,
-    pub(crate) major_version: u16,
-    pub(crate) constant_pool_count: u16,
-    pub(crate) constant_pool: Vec<Constant>,
-    pub(crate) access_flags: u16,
-    pub(crate) this_class: u16,
-    pub(crate) super_class: u16,
-    pub(crate) interfaces_count: u16,
-    pub(crate) interfaces: Vec<u16>, //Index into the constant pool
-    pub(crate) field_count: u16,
-    pub(crate) fields: Vec<FieldInfo>,
-    pub(crate) method_count: u16,
-    pub(crate) methods: Vec<MethodInfo>,
-    pub(crate) attribute_count: u16,
-    pub(crate) attributes: Vec<Attribute>
+pub struct ClassInfo {
+    pub magic: u32,
+    pub minor_version: u16,
+    pub major_version: u16,
+    pub constant_pool_count: u16,
+    pub constant_pool: Vec<Constant>,
+    pub access_flags: u16,
+    pub this_class: String,
+    pub super_class: String,
+    pub interfaces_count: u16,
+    pub interfaces: Vec<u16>, //Index into the constant pool
+    pub field_count: u16,
+    pub fields: Vec<FieldInfo>,
+    pub method_count: u16,
+    pub method_map: HashMap<String, Method>,
+    pub attribute_count: u16,
+    pub attribute_map: HashMap<String, Attribute>
     //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
 }
+
+pub struct ConstantPool {
+    pool: Vec<Constant>
+}
+
+// pub struct LinkedClass<'a> {
+//     pub info: &'a ClassInfo,
+//     pub interfaces:
+// }
 
 //Access flags for methods and classes
 pub enum AccessFlags {
@@ -40,41 +49,175 @@ pub enum AccessFlags {
     SYNTHETIC = 0x1000
 }
 
-pub struct MethodInfo {
-    access_flags: u16,
-    name_index: u16,
-    descriptor_index: u16,
-    attributes_count: u16,
-    attributes: Vec<Attribute>
+pub struct Method {
+    pub access_flags: u16,
+    pub name: String,
+    pub name_index: u16,
+    pub descriptor: String,
+    pub descriptor_index: u16,
+    pub attributes_count: u16,
+    pub attribute_map: HashMap<String, Attribute>
+}
+
+#[derive(Debug)]
+pub enum FieldDescriptor {
+    BaseType(BaseType),
+    /// String will be a classpath to a class
+    ObjectType(String),
+    //ArrayType will be an ArrayType struct containing the amount of dimensions and a FieldDescriptor that resolves to either BaseType or ObjectType
+    ArrayType(ArrayType)
+}
+
+impl FieldDescriptor {
+    pub fn parse(desc: &str) -> FieldDescriptor {
+        if "BCDFIJSZ".contains(&desc[0..1]) { //BaseType
+            return FieldDescriptor::BaseType(BaseType::get(&desc[0..1]))
+        } else if &desc[0..1] == "L" { //ObjectType
+            return FieldDescriptor::ObjectType(String::from(&desc[1..desc.len()-1]))
+        } else if &desc[0..1] == "[" {//ArrayType
+            let mut dimensions: usize = 0;
+            for i in 0..desc.len() {
+                if &desc[i..i+1] != "[" {
+                    dimensions = i;
+                    break;
+                } else if i == desc.len()-1 {
+                    panic!("Invalid FieldDescriptor, no end of array type!");
+                }
+            }
+
+            if "BCDFIJSZ".contains(&desc[dimensions..dimensions+1]) { //BaseType
+                return FieldDescriptor::ArrayType(ArrayType {
+                    dimensions: dimensions as u8,
+                    field_descriptor: Box::new(FieldDescriptor::BaseType(BaseType::get(&desc[dimensions..dimensions+1])))
+                })
+            } else if &desc[dimensions..dimensions+1] == "L" { //ObjectType
+                return FieldDescriptor::ArrayType(ArrayType {
+                    dimensions: dimensions as u8,
+                    field_descriptor: Box::new(FieldDescriptor::ObjectType(String::from(&desc[dimensions+1..desc.len()-1])))
+                })
+            }
+        }
+
+        panic!("Malformed field descriptor!")
+    }
+}
+
+#[derive(Debug)]
+pub enum BaseType {
+    Byte,
+    Char,
+    Double,
+    Float,
+    Int,
+    Long,
+    Reference,
+    Z
+}
+
+impl BaseType {
+    pub fn get(char: &str) -> BaseType {
+        match char {
+            "B" => BaseType::Byte,
+            "C" => BaseType::Char,
+            "D" => BaseType::Char,
+            "F" => BaseType::Char,
+            "I" => BaseType::Char,
+            "J" => BaseType::Char,
+            "S" => BaseType::Char,
+            "Z" => BaseType::Char,
+            c => panic!(format!("{} is not a BaseType", c))
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ArrayType {
+    pub field_descriptor: Box<FieldDescriptor>,
+    pub dimensions: u8
+}
+
+impl Method {
+    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
+        let attr_count: u16;
+        let n_index;
+        let d_index;
+
+        Self {
+            access_flags: rdr.read_u16::<BigEndian>().unwrap(),
+            name_index: {
+                n_index = rdr.read_u16::<BigEndian>().unwrap();
+                n_index
+            },
+            name:
+                match constant_pool.get(n_index as usize).unwrap() {
+                    Constant::Utf8(string) => String::from(string),
+                    _ => panic!("Expected UTF8 for method name")
+                },
+            descriptor_index: {
+                d_index = rdr.read_u16::<BigEndian>().unwrap();
+                d_index
+            },
+            descriptor:
+                match constant_pool.get(n_index as usize).unwrap() {
+                    Constant::Utf8(string) => String::from(string),
+                    _ => panic!("Expected UTF8 for descriptor")
+                },
+            attributes_count: {
+                attr_count = rdr.read_u16::<BigEndian>().unwrap();
+                attr_count
+            },
+            attribute_map: {
+                let mut attr_map: HashMap<String, Attribute> = HashMap::new();
+
+                for _ in 0..attr_count {
+                    let attr = Attribute::from_bytes(rdr, &constant_pool);
+                    attr_map.insert(String::from(&attr.attribute_name), attr);
+                }
+
+                attr_map
+            }
+        }
+    }
 }
 
 pub struct FieldInfo {
-    access_flags: u16,
-    name_index: u16,
-    descriptor_index: u16,
-    attributes_count: u16,
-    attributes: Vec<Attribute>
+    pub(crate) access_flags: u16,
+    pub(crate) name_index: u16,
+    pub descriptor: FieldDescriptor,
+    pub(crate) descriptor_index: u16,
+    pub(crate) attributes_count: u16,
+    pub(crate) attribute_map: HashMap<String, Attribute>
 }
 
 impl FieldInfo {
-    pub fn from_bytes(rdr: &mut Cursor<&Vec<u8>>) -> Self {
+    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
         let count: u16;
+
+        let desc_index;
 
         FieldInfo {
             access_flags: rdr.read_u16::<BigEndian>().unwrap(),
             name_index: rdr.read_u16::<BigEndian>().unwrap(),
-            descriptor_index: rdr.read_u16::<BigEndian>().unwrap(),
+            descriptor_index: {
+                desc_index = rdr.read_u16::<BigEndian>().unwrap();
+                desc_index
+            },
+            descriptor: match constant_pool.get(desc_index as usize).unwrap() {
+                Constant::Utf8(string) => FieldDescriptor::parse(string),
+                _ => panic!("Descriptor must be UTF8!")
+            },
             attributes_count: {
                 count = rdr.read_u16::<BigEndian>().unwrap();
                 count
             },
-            attributes: {
-                let mut attributes: Vec<Attribute> = Vec::new();
-                for i in 0..count {
-                    attributes.push(Attribute::from_bytes(rdr));
+            attribute_map: {
+                let mut attr_map: HashMap<String, Attribute> = HashMap::new();
+                for _ in 0..count {
+                    let attr = Attribute::from_bytes(rdr, constant_pool);
+                    attr_map.insert(String::from(&attr.attribute_name), attr);
                 }
 
-                attributes
+                attr_map
             }
         }
     }
@@ -85,39 +228,101 @@ impl FieldInfo {
 //for the JVM, ironically, because Annotations are actually a form of attribute at compile-time.
 pub mod attribute {
     use crate::vm::class::attribute::stackmap::StackMapFrame;
-    use std::io::Cursor;
+    use std::io::{Cursor};
     use byteorder::{ReadBytesExt, BigEndian};
-    use crate::vm::class::FromBytes;
-    use crate::vm::class::constant::{Constant, PoolTag};
+    use crate::vm::class::constant::{Constant};
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     pub struct Attribute {
-        attribute_name: String,
+        pub attribute_name: String,
         info: AttributeItem
     }
 
     impl Attribute {
-        fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
+        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
+            let start_pos = rdr.position();
+
             let attribute_name_index = rdr.read_u16::<BigEndian>().unwrap();
             let length = rdr.read_u32::<BigEndian>().unwrap();
 
-            let attribute_name_constant: &Constant = constant_pool.get(attribute_name_index as usize).unwrap();
+            let max_pos = start_pos+(length as u64)+6; //in bytes
 
-            if(attribute_name_constant.tag != PoolTag::Utf8) { //Needs to be a String
-                panic!("Attribute name must be resolve to UTF8 in the constant pool!");
+            let attribute_constant: &Constant = constant_pool.get(attribute_name_index as usize).unwrap();
+
+            let utf8_string = match attribute_constant {
+                Constant::Utf8(string) => string,
+                _ => {
+                    println!("Constant (index: {}) must be UTF8 in the constant pool!", attribute_name_index);
+                    panic!("error");
+                }
+            };
+
+            let attr_out = Attribute {
+                attribute_name: String::from(utf8_string),
+                info: match &utf8_string[..] {
+                    "ConstantValue" => AttributeItem::ConstantValue(ConstantValue {
+                        constant_value_index: rdr.read_u16::<BigEndian>().unwrap()
+                    }),
+                    "Code" => AttributeItem::Code({
+                        let code_len: u32;
+                        let exception_table_len: u16;
+                        let attr_count: u16;
+                        Code {
+                            max_stack: rdr.read_u16::<BigEndian>().unwrap(),
+                            max_locals: rdr.read_u16::<BigEndian>().unwrap(),
+                            code_length: {
+                                code_len = rdr.read_u32::<BigEndian>().unwrap();
+                                code_len
+                            },
+                            code: {
+                                let mut vec: Vec<u8> = Vec::new();
+                                for _ in 0..code_len {
+                                    vec.push(rdr.read_u8().unwrap())
+                                }
+                                vec
+                            },
+                            exception_table_length: {
+                                exception_table_len = rdr.read_u16::<BigEndian>().unwrap();
+                                exception_table_len
+                            },
+                            exception_table: {
+                                let mut vec: Vec<CodeExceptionTable> = Vec::new();
+                                for _ in 0..exception_table_len {
+                                    vec.push(CodeExceptionTable {
+                                        start_pc: rdr.read_u16::<BigEndian>().unwrap(),
+                                        end_pc: rdr.read_u16::<BigEndian>().unwrap(),
+                                        handler_pc: rdr.read_u16::<BigEndian>().unwrap(),
+                                        catch_type: rdr.read_u16::<BigEndian>().unwrap()
+                                    });
+                                }
+                                vec
+                            },
+                            attributes_count: {
+                                attr_count = rdr.read_u16::<BigEndian>().unwrap();
+                                attr_count
+                            },
+                            attributes: {
+                                let mut vec: Vec<Attribute> = Vec::new();
+                                for _ in 0..attr_count {
+                                    vec.push(Attribute::from_bytes(rdr, constant_pool));
+                                }
+                                vec
+                            }
+                        }
+                    }),
+                    _ => {
+                        rdr.set_position(rdr.position() + (length as u64));
+                        AttributeItem::Unimplemented
+                    }
+                }
+            };
+
+            if rdr.position() > max_pos {
+                println!("Start @ {}, length is {}, end is {}, current pos is {}", start_pos, length, max_pos, rdr.position());
+                panic!("Read too far out of attribute! Lost track of offset");
             }
 
-            let attribute_name_utf8: Constant::Utf8 = &attribute_name_constant;
-            let attribute_name_string: String;
-
-            if let Constant::Utf8(string) = attribute_name_utf8 {
-                attribute_name_string = string;
-            }
-
-            Attribute {
-                attribute_name: "".to_string(),
-                info: {}
-            }
+            attr_out
         }
     }
 
@@ -138,7 +343,8 @@ pub mod attribute {
         LocalVariableTable(LocalVariableTable),
         Deprecated(Deprecated),
         RuntimeVisibleAnnotations(RuntimeVisibleAnnotations),
-        Annotation(Annotation)
+        Annotation(Annotation),
+        Unimplemented
     }
 
     pub struct ConstantValue {
@@ -151,7 +357,9 @@ pub mod attribute {
         code_length: u32,
         code: Vec<u8>, //Stream of bytes
         exception_table_length: u16,
-        exception_table: Vec<CodeExceptionTable>
+        exception_table: Vec<CodeExceptionTable>,
+        attributes_count: u16,
+        attributes: Vec<Attribute>
     }
 
     pub struct CodeExceptionTable {
@@ -194,7 +402,7 @@ pub mod attribute {
         classes: Vec<InnerClassEntry>
     }
 
-    struct InnerClassEntry {
+    pub struct InnerClassEntry {
         inner_class_info_index: u16,
         outer_class_info_index: u16,
         inner_name_index: u16,
@@ -282,9 +490,8 @@ pub mod attribute {
 }
 
 pub mod constant {
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor};
     use byteorder::{ReadBytesExt, BigEndian};
-    use std::any::Any;
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4
     #[repr(u8)]
@@ -356,6 +563,7 @@ pub mod constant {
         }
     }
 
+    #[derive(Debug)]
     pub enum Constant {
         ///bytes
         Utf8(String),
@@ -384,7 +592,7 @@ pub mod constant {
     }
 
     impl Constant {
-        pub fn from_bytes(rdr: &mut Cursor<&Vec<u8>>) -> Constant {
+        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>) -> Constant {
             let tag = rdr.read_u8().unwrap();
             let as_pool_tag: PoolTag = tag.into();
 
@@ -392,7 +600,7 @@ pub mod constant {
                 PoolTag::Utf8 => {
                     let length = rdr.read_u16::<BigEndian>().unwrap();
                     let mut buf = Vec::new();
-                    for i in 0..length {
+                    for _ in 0..length {
                         buf.push(rdr.read_u8().unwrap());
                     }
                     Constant::Utf8(String::from_utf8(buf).unwrap())
@@ -413,8 +621,7 @@ pub mod constant {
                 PoolTag::NameAndType => Constant::NameAndType(rdr.read_u16::<BigEndian>().unwrap(), rdr.read_u16::<BigEndian>().unwrap()),
                 PoolTag::MethodHandle => Constant::MethodHandle(rdr.read_u8().unwrap(), rdr.read_u16::<BigEndian>().unwrap()),
                 PoolTag::MethodType => Constant::MethodType(rdr.read_u16::<BigEndian>().unwrap()),
-                PoolTag::InvokeDynamic => Constant::InvokeDynamic(rdr.read_u16::<BigEndian>().unwrap(), rdr.read_u16::<BigEndian>().unwrap()),
-                e => panic!("Unknown constant tag type {}!",e.as_int())
+                PoolTag::InvokeDynamic => Constant::InvokeDynamic(rdr.read_u16::<BigEndian>().unwrap(), rdr.read_u16::<BigEndian>().unwrap())
             }
         }
     }
