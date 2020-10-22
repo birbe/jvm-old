@@ -1,5 +1,7 @@
-public class Object<T> {
+package java.lang;
 
-    Object() {}
+public class Object {
+
+    public Object() {}
 
 }

@@ -1,14 +1,18 @@
 public class Main {
-    private String some_field;
 
-    public void other_method() {
+    public Main() {
 
     }
 
+    public static native void print_int(int a);
+
+    public static native void print_string(String str);
+
+    public SomeInterface returns_interface() {
+        return null;
+    }
+
     public static void main(String[] args) {
-        int i = 0;
-        while(i < 100) {
-            i++;
-        }
+        Main.print_string("test");
     }
 }

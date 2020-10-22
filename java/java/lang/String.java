@@ -1,3 +1,10 @@
+package java.lang;
+
 public class String {
-    String() {}
+
+    private char[] chars;
+
+    public String(char[] chars) {
+        this.chars = chars;
+    }
 }
