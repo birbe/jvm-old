@@ -1,31 +1,124 @@
 use crate::vm::class::attribute::{Attribute};
 use crate::vm::class::constant::Constant;
+
 use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use std::collections::HashMap;
+use std::mem::size_of;
 
-pub struct ClassInfo {
-    pub magic: u32,
-    pub minor_version: u16,
-    pub major_version: u16,
-    pub constant_pool_count: u16,
-    pub constant_pool: Vec<Constant>,
+pub struct Class { //Raw parsed info from the .class file
+    pub constant_pool: ConstantPool,
     pub access_flags: u16,
     pub this_class: String,
     pub super_class: String,
-    pub interfaces_count: u16,
     pub interfaces: Vec<u16>, //Index into the constant pool
-    pub field_count: u16,
-    pub fields: Vec<FieldInfo>,
-    pub method_count: u16,
-    pub method_map: HashMap<String, Method>,
-    pub attribute_count: u16,
+    pub field_map: HashMap<String, ObjectField>,
+    pub method_map: HashMap<String, HashMap<String, Method>>,
     pub attribute_map: HashMap<String, Attribute>
     //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
 }
 
+impl Class {
+    pub fn get_field(&self, name: &String) -> &ObjectField {
+        self.field_map.get(name).unwrap()
+    }
+
+    pub fn get_method(&self, name: &str, descriptor: &str) -> &Method {
+        self.method_map.get(name).unwrap().get(descriptor).expect(&*format!("Method \"{}{}\" does not exist in class \"{}\"", name, descriptor, self.this_class))
+    }
+}
+
+pub struct ObjectField {
+    pub offset: isize,
+    pub info: FieldInfo
+}
+
+pub struct RefInfo {
+    pub class_name: String,
+    pub name: String,
+    pub descriptor: String,
+}
+
 pub struct ConstantPool {
     pool: Vec<Constant>
+}
+
+impl ConstantPool {
+    pub fn new() -> Self {
+        ConstantPool {
+            pool: Vec::new()
+        }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Constant> {
+        self.pool.get(index)
+    }
+
+    pub fn insert(&mut self, index: usize, constant: Constant) {
+        self.pool.insert(index, constant)
+    }
+
+    pub fn push(&mut self, constant: Constant) {
+        self.pool.push(constant)
+    }
+
+    // pub fn resolve_string(&self, index: usize) -> Constant::Utf8 {
+    // }
+
+    pub fn resolve_class_info(&self, index: usize) -> &String {
+        let class_info = self.get(index).unwrap();
+        if let Constant::Class(utf8_index) = class_info {
+            if let Constant::Utf8(classname) = self.get(*utf8_index as usize).unwrap() {
+                classname
+            } else { panic!("Constant did not resolve to UTF8!"); }
+        } else { panic!("Constant did not resolve to class!"); }
+    }
+
+    pub fn resolve_name_and_type(&self, index: usize) -> (&String, &String) {
+        if let Constant::NameAndType(name_index, descriptor_index) = self.pool.get(index).unwrap() {
+            if let Constant::Utf8(name) = self.pool.get(*name_index as usize).unwrap() {
+                if let Constant::Utf8(descriptor) = self.pool.get(*descriptor_index as usize).unwrap() {
+                    (name, descriptor)
+                } else { panic!("Did not resolve to UTF8 constant!"); }
+            } else { panic!("Did not resolve to UTF8 constant!"); }
+        } else { panic!("Did not resolve to NameAndType constant!"); }
+    }
+
+    pub fn resolve_ref_info(&self, index: usize) -> RefInfo {
+        match self.get(index).unwrap() {
+            Constant::MethodRef(class_index, name_and_type_index) => {
+                let class = self.resolve_class_info(*class_index as usize);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+
+                RefInfo {
+                    class_name: class.clone(),
+                    name: name_and_type.0.clone(),
+                    descriptor: name_and_type.1.clone(),
+                }
+            },
+            Constant::FieldRef(class_index, name_and_type_index) => {
+                let class = self.resolve_class_info(*class_index as usize);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+
+                RefInfo {
+                    class_name: class.clone(),
+                    name: name_and_type.0.clone(),
+                    descriptor: name_and_type.1.clone(),
+                }
+            },
+            Constant::InterfaceMethodRef(class_index, name_and_type_index) => {
+                let class = self.resolve_class_info(*class_index as usize);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+
+                RefInfo {
+                    class_name: class.clone(),
+                    name: name_and_type.0.clone(),
+                    descriptor: name_and_type.1.clone(),
+                }
+            },
+            _ => panic!("Constant did not resolve to a Methodref, fieldref, or InterfaceMethodRef!")
+        }
+    }
 }
 
 // pub struct LinkedClass<'a> {
@@ -47,6 +140,12 @@ pub enum AccessFlags {
     ABSTRACT = 0x400,
     STRICT = 0x800,
     SYNTHETIC = 0x1000
+}
+
+impl AccessFlags {
+    pub fn is_native(flags: &u16) -> bool {
+        flags & 0x100 == 0x100
+    }
 }
 
 pub struct Method {
@@ -98,7 +197,52 @@ impl FieldDescriptor {
             }
         }
 
-        panic!("Malformed field descriptor!")
+        panic!(format!("Malformed field descriptor {}", desc));
+    }
+}
+
+#[derive(Debug)]
+pub enum MethodReturnType {
+    Void,
+    FieldDescriptor(FieldDescriptor)
+}
+
+#[derive(Debug)]
+pub struct MethodDescriptor {
+    pub parameters: Vec<FieldDescriptor>,
+    pub return_type: MethodReturnType
+}
+
+impl MethodDescriptor {
+    pub fn parse(input: &str) -> MethodDescriptor {
+        let mut parameters: Vec<FieldDescriptor> = Vec::new();
+        let params_end = input.find(")").unwrap();
+
+        let mut pos: usize = 1;
+
+        while pos < input.len() {
+            if pos == params_end { break; }
+
+            if "BCDFIJSZ".contains(&input[pos..pos+1]) {
+                parameters.push(FieldDescriptor::parse(&input[pos..pos+1]));
+                pos += 1;
+            } else {
+                let end = (&input[pos..]).find(";").unwrap() + pos;
+                parameters.push(FieldDescriptor::parse(&input[pos..=end]));
+                pos = end+1;
+            }
+        }
+
+        MethodDescriptor {
+            parameters,
+            return_type: {
+                if &input[input.len()-1..input.len()] == "V" {
+                    MethodReturnType::Void
+                } else {
+                    MethodReturnType::FieldDescriptor(FieldDescriptor::parse(&input[params_end+1..]))
+                }
+            }
+        }
     }
 }
 
@@ -111,7 +255,8 @@ pub enum BaseType {
     Int,
     Long,
     Reference,
-    Z
+    Bool,
+    Short
 }
 
 impl BaseType {
@@ -119,13 +264,45 @@ impl BaseType {
         match char {
             "B" => BaseType::Byte,
             "C" => BaseType::Char,
-            "D" => BaseType::Char,
-            "F" => BaseType::Char,
-            "I" => BaseType::Char,
-            "J" => BaseType::Char,
-            "S" => BaseType::Char,
-            "Z" => BaseType::Char,
+            "D" => BaseType::Double,
+            "F" => BaseType::Float,
+            "I" => BaseType::Int,
+            "J" => BaseType::Long,
+            "S" => BaseType::Short,
+            "Z" => BaseType::Bool,
             c => panic!(format!("{} is not a BaseType", c))
+        }
+    }
+
+    pub fn size_of(base: &BaseType) -> usize {
+        match base {
+            BaseType::Byte => {
+                1
+            },
+            BaseType::Char => {
+                2
+            },
+            BaseType::Double => {
+                8
+            },
+            BaseType::Float => {
+                4
+            },
+            BaseType::Int => {
+                4
+            },
+            BaseType::Long => {
+                8
+            },
+            BaseType::Reference => {
+                size_of::<usize>()
+            },
+            BaseType::Bool => {
+                1
+            },
+            BaseType::Short => {
+                2
+            }
         }
     }
 }
@@ -137,7 +314,7 @@ pub struct ArrayType {
 }
 
 impl Method {
-    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
+    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
         let attr_count: u16;
         let n_index;
         let d_index;
@@ -158,7 +335,7 @@ impl Method {
                 d_index
             },
             descriptor:
-                match constant_pool.get(n_index as usize).unwrap() {
+                match constant_pool.get(d_index as usize).unwrap() {
                     Constant::Utf8(string) => String::from(string),
                     _ => panic!("Expected UTF8 for descriptor")
                 },
@@ -181,37 +358,27 @@ impl Method {
 }
 
 pub struct FieldInfo {
-    pub(crate) access_flags: u16,
-    pub(crate) name_index: u16,
-    pub descriptor: FieldDescriptor,
-    pub(crate) descriptor_index: u16,
-    pub(crate) attributes_count: u16,
-    pub(crate) attribute_map: HashMap<String, Attribute>
+    pub access_flags: u16,
+    pub name: String,
+    pub field_descriptor: FieldDescriptor,
+    pub attribute_map: HashMap<String, Attribute>
 }
 
 impl FieldInfo {
-    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
-        let count: u16;
-
-        let desc_index;
-
+    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
         FieldInfo {
             access_flags: rdr.read_u16::<BigEndian>().unwrap(),
-            name_index: rdr.read_u16::<BigEndian>().unwrap(),
-            descriptor_index: {
-                desc_index = rdr.read_u16::<BigEndian>().unwrap();
-                desc_index
+            name: match constant_pool.get(rdr.read_u16::<BigEndian>().unwrap() as usize).unwrap() {
+                Constant::Utf8(str) => str.clone(),
+                _ => panic!("Name index did not resolve to a UTF8 constant!")
             },
-            descriptor: match constant_pool.get(desc_index as usize).unwrap() {
+            field_descriptor: match constant_pool.get(rdr.read_u16::<BigEndian>().unwrap() as usize).unwrap() {
                 Constant::Utf8(string) => FieldDescriptor::parse(string),
                 _ => panic!("Descriptor must be UTF8!")
             },
-            attributes_count: {
-                count = rdr.read_u16::<BigEndian>().unwrap();
-                count
-            },
             attribute_map: {
                 let mut attr_map: HashMap<String, Attribute> = HashMap::new();
+                let count = rdr.read_u16::<BigEndian>().unwrap();
                 for _ in 0..count {
                     let attr = Attribute::from_bytes(rdr, constant_pool);
                     attr_map.insert(String::from(&attr.attribute_name), attr);
@@ -231,15 +398,16 @@ pub mod attribute {
     use std::io::{Cursor};
     use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::constant::{Constant};
+    use crate::vm::class::ConstantPool;
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     pub struct Attribute {
         pub attribute_name: String,
-        info: AttributeItem
+        pub info: AttributeItem
     }
 
     impl Attribute {
-        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &Vec<Constant>) -> Self {
+        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
             let start_pos = rdr.position();
 
             let attribute_name_index = rdr.read_u16::<BigEndian>().unwrap();
@@ -267,6 +435,7 @@ pub mod attribute {
                         let code_len: u32;
                         let exception_table_len: u16;
                         let attr_count: u16;
+
                         Code {
                             max_stack: rdr.read_u16::<BigEndian>().unwrap(),
                             max_locals: rdr.read_u16::<BigEndian>().unwrap(),
@@ -355,7 +524,7 @@ pub mod attribute {
         max_stack: u16,
         max_locals: u16,
         code_length: u32,
-        code: Vec<u8>, //Stream of bytes
+        pub code: Vec<u8>, //Stream of bytes
         exception_table_length: u16,
         exception_table: Vec<CodeExceptionTable>,
         attributes_count: u16,
@@ -567,10 +736,10 @@ pub mod constant {
     pub enum Constant {
         ///bytes
         Utf8(String),
-        Integer(u32),
-        Float(u32),
-        Long(u64),
-        Double(u64),
+        Integer(i32),
+        Float(f32),
+        Long(i64),
+        Double(f64),
         ///name_index
         Class(u16),
         ///string_index
@@ -605,13 +774,11 @@ pub mod constant {
                     }
                     Constant::Utf8(String::from_utf8(buf).unwrap())
                 },
-                PoolTag::Integer => Constant::Integer(rdr.read_u32::<BigEndian>().unwrap()),
-                PoolTag::Float => Constant::Float(rdr.read_u32::<BigEndian>().unwrap()),
-                PoolTag::Long => Constant::Long(
-                        (rdr.read_u32::<BigEndian>().unwrap() as u64) << 32 & (rdr.read_u32::<BigEndian>().unwrap() as u64)
-                    ),
-                PoolTag::Double => Constant::Long(
-                    (rdr.read_u32::<BigEndian>().unwrap() as u64) << 32 & (rdr.read_u32::<BigEndian>().unwrap() as u64)
+                PoolTag::Integer => Constant::Integer(rdr.read_i32::<BigEndian>().unwrap()),
+                PoolTag::Float => Constant::Float(rdr.read_f32::<BigEndian>().unwrap()),
+                PoolTag::Long => Constant::Long(rdr.read_i64::<BigEndian>().unwrap()),
+                PoolTag::Double => Constant::Double(
+                    rdr.read_f64::<BigEndian>().unwrap()
                 ),
                 PoolTag::Class => Constant::Class(rdr.read_u16::<BigEndian>().unwrap()),
                 PoolTag::String => Constant::String(rdr.read_u16::<BigEndian>().unwrap()),

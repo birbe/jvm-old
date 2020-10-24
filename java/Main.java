@@ -13,6 +13,6 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        Main.print_string("test");
+        Main.print_string("Let's make it invoke java/lang/String");
     }
 }
