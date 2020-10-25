@@ -39,8 +39,6 @@ fn main() {
             mut_thread.step();
         }
 
-        println!("Time elapsed {}", SystemTime::now().duration_since(start).unwrap().as_millis());
-
-        println!("Execution has finished.");
+        println!("\n[Execution has finished.]\nTime elapsed: {}ms", SystemTime::now().duration_since(start).unwrap().as_millis());
     }
 }

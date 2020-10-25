@@ -2,6 +2,10 @@ package java.lang;
 
 public class Object {
 
-    public Object() {}
+    public String test_field;
+
+    public Object() {
+        this.test_field = "uwu";
+    }
 
 }

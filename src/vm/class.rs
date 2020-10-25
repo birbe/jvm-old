@@ -5,6 +5,7 @@ use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use std::collections::HashMap;
 use std::mem::size_of;
+use crate::vm::vm::OperandType;
 
 pub struct Class { //Raw parsed info from the .class file
     pub constant_pool: ConstantPool,
@@ -61,9 +62,6 @@ impl ConstantPool {
     pub fn push(&mut self, constant: Constant) {
         self.pool.push(constant)
     }
-
-    // pub fn resolve_string(&self, index: usize) -> Constant::Utf8 {
-    // }
 
     pub fn resolve_class_info(&self, index: usize) -> &String {
         let class_info = self.get(index).unwrap();

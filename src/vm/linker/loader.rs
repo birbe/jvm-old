@@ -89,13 +89,11 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
     for _ in 0..field_count {
         let field = FieldInfo::from_bytes(&mut rdr, &constant_pool);
 
-        unsafe {
-            new_offset += match &field.field_descriptor {
-                FieldDescriptor::BaseType(b_type) => BaseType::size_of(b_type),
-                FieldDescriptor::ObjectType(_) => size_of::<usize>(),
-                FieldDescriptor::ArrayType(_) => size_of::<usize>()
-            } as isize;
-        }
+        new_offset += match &field.field_descriptor {
+            FieldDescriptor::BaseType(b_type) => BaseType::size_of(b_type),
+            FieldDescriptor::ObjectType(_) => size_of::<usize>(),
+            FieldDescriptor::ArrayType(_) => size_of::<usize>()
+        } as isize;
 
         field_map.insert(field.name.clone(), ObjectField {
             offset: old_offset,

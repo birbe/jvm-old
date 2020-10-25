@@ -2,10 +2,6 @@ package java.lang;
 
 public class String {
 
-    static {
-        print("Test");
-    }
-
     private char[] chars;
 
     public String(char[] chars) {
