@@ -1,10 +1,9 @@
 import java.lang.String;
+import birb.Event;
+
+import birb.MessageEventSubclass;
 
 public class Main {
-
-    static {
-        print_string("Something, lol idk");
-    }
 
     public Main() {
 
@@ -14,19 +13,15 @@ public class Main {
 
     public static native void print_string(String str);
 
-    public static native long get_time();
+    public static native void print_benchmark();
 
-    public SomeInterface returns_interface() {
-        return null;
+    public String idk() {
+        return "FUCK";
     }
 
     public static void main(String[] args) {
-        //Checking time to allocate 10000 objects
-//        long time = get_time();
-        print_string("Allocating 1 million objects...");
-        for(int i=0;i<1000000;i++) {
-            Object obj = new Object();
-        }
-        print_string("Done.");
+        Main main = new Main();
+        String thingy = main.idk();
+        print_string(thingy);
     }
 }

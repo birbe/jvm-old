@@ -6,6 +6,7 @@ use crate::vm::class::attribute::{Attribute};
 use std::collections::HashMap;
 use crate::vm::class::FieldDescriptor;
 use std::mem::size_of;
+use std::rc::Rc;
 
 pub fn load_class(bytes: Vec<u8>) -> Class {
     let mut rdr = Cursor::new(bytes);
@@ -17,7 +18,7 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
     }
 
     let major = rdr.read_u16::<BigEndian>().unwrap();
-    let minor = rdr.read_u16::<BigEndian>().unwrap();
+    let _minor = rdr.read_u16::<BigEndian>().unwrap();
 
     if major > 51 {
         panic!("Major version too high for this JVM implementation. Aborting");
@@ -64,7 +65,7 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
         if this_class != "java/lang/Object" {
             panic!(format!("Superclass must be a ClassInfo constant! {:?}", constant_pool.get(super_class_index as usize).unwrap()));
         } else {
-            super_class = String::from(""); //Object does not have a superclass.
+            super_class = String::from(""); // java/lang/Object does not have a superclass.
         }
     }
 
@@ -86,14 +87,25 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
         panic!("java/lang/String had no fields");
     }
 
+    let mut heap_size: usize = 0;
+
     for _ in 0..field_count {
         let field = FieldInfo::from_bytes(&mut rdr, &constant_pool);
 
-        new_offset += match &field.field_descriptor {
-            FieldDescriptor::BaseType(b_type) => BaseType::size_of(b_type),
-            FieldDescriptor::ObjectType(_) => size_of::<usize>(),
-            FieldDescriptor::ArrayType(_) => size_of::<usize>()
+        let size = match &field.field_descriptor {
+            FieldDescriptor::BaseType(b_type) => {
+                BaseType::size_of(b_type)
+            },
+            FieldDescriptor::ObjectType(_) => {
+                size_of::<usize>()
+            },
+            FieldDescriptor::ArrayType(_) => {
+                size_of::<usize>()
+            }
         } as isize;
+
+        heap_size += size as usize;
+        new_offset += size;
 
         field_map.insert(field.name.clone(), ObjectField {
             offset: old_offset,
@@ -103,6 +115,8 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
         old_offset = new_offset;
     }
 
+
+
     let method_count = rdr.read_u16::<BigEndian>().unwrap();
 
     // let method_map: HashMap<String, HashMap<String, Method>> = (0..method_count).map( |_| {
@@ -110,7 +124,7 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
     //     (String::from(&m.name), HashMap::new())
     // }).collect();
 
-    let mut method_map: HashMap<String, HashMap<String, Method>> = HashMap::new();
+    let mut method_map: HashMap<String, HashMap<String, Rc<Method>>> = HashMap::new();
 
     for _ in 0..method_count {
         let m = Method::from_bytes(&mut rdr, &constant_pool);
@@ -121,7 +135,7 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
 
         method_map.get_mut(m.name.clone().as_str())
             .unwrap()
-            .insert(String::from(&m.descriptor), m);
+            .insert(String::from(&m.descriptor), Rc::new(m));
     }
 
     let attribute_count = rdr.read_u16::<BigEndian>().unwrap();
@@ -140,6 +154,8 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
         interfaces,
         field_map,
         method_map,
-        attribute_map
+        attribute_map,
+        heap_size,
+        full_heap_size: heap_size
     }
 }

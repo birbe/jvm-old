@@ -1,15 +1,9 @@
 extern crate jvm;
 
-use jvm::vm::vm::{VirtualMachine, Type};
+use jvm::vm::vm::{VirtualMachine};
 use std::fs;
 use std::env::current_dir;
-use std::ops::Deref;
-use std::borrow::{BorrowMut, Borrow};
-use std::rc::Rc;
-use std::cell::RefCell;
-use std::process::exit;
 use std::time::SystemTime;
-use jvm::vm::class::MethodDescriptor;
 
 fn main() {
     let dir = current_dir().unwrap();
@@ -20,25 +14,30 @@ fn main() {
 
     let vm_rc = VirtualMachine::new(normalized);
 
-    let mut vm = (*vm_rc).borrow_mut();
-
-    vm.load_and_link_class("Main");
-
-    let class = vm.get_class("Main");
+    let start;
 
     {
-        let thread = VirtualMachine::spawn_thread(vm_rc.clone(), vm, String::from("Main"), "main", "([Ljava/lang/String;)V",class.clone(), vec![
-            String::from("It appears it is working! Awesome!")
+        let mut vm = (*vm_rc).borrow_mut();
+
+        #[allow(non_snake_case)]
+        let (_, class_Main) = vm.load_and_link_class("Main");
+
+        vm.start_time = SystemTime::now();
+
+        let thread = VirtualMachine::spawn_thread(vm_rc.clone(), vm, String::from("Main"), "main", "([Ljava/lang/String;)V", class_Main.clone(), vec![
+            //JVM arguments go here
         ]);
 
         let mut mut_thread = (*thread).borrow_mut();
 
-        let start = SystemTime::now();
+        start = SystemTime::now();
 
         while mut_thread.get_stack_count() > 0 {
             mut_thread.step();
         }
-
-        println!("\n[Execution has finished.]\nTime elapsed: {}ms", SystemTime::now().duration_since(start).unwrap().as_millis());
     }
+
+    let vm = (*vm_rc).borrow();
+
+    println!("\n[Execution has finished.]\nTime elapsed: {}ms\nObject count: {}", SystemTime::now().duration_since(start).unwrap().as_millis(), vm.objects.len());
 }

@@ -5,7 +5,8 @@ use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use std::collections::HashMap;
 use std::mem::size_of;
-use crate::vm::vm::OperandType;
+use crate::vm::vm::{OperandType};
+use std::rc::Rc;
 
 pub struct Class { //Raw parsed info from the .class file
     pub constant_pool: ConstantPool,
@@ -14,8 +15,11 @@ pub struct Class { //Raw parsed info from the .class file
     pub super_class: String,
     pub interfaces: Vec<u16>, //Index into the constant pool
     pub field_map: HashMap<String, ObjectField>,
-    pub method_map: HashMap<String, HashMap<String, Method>>,
-    pub attribute_map: HashMap<String, Attribute>
+    pub method_map: HashMap<String, HashMap<String, Rc<Method>>>,
+    pub attribute_map: HashMap<String, Attribute>,
+
+    pub heap_size: usize,
+    pub full_heap_size: usize //Heap size of this class plus the superclass
     //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
 }
 
@@ -24,8 +28,20 @@ impl Class {
         self.field_map.get(name).unwrap()
     }
 
-    pub fn get_method(&self, name: &str, descriptor: &str) -> &Method {
-        self.method_map.get(name).unwrap().get(descriptor).expect(&*format!("Method \"{}{}\" does not exist in class \"{}\"", name, descriptor, self.this_class))
+    pub fn get_method(&self, name: &str, descriptor: &str) -> Rc<Method> {
+        self.method_map.get(name).unwrap().get(descriptor).expect(&*format!("Method \"{}{}\" does not exist in class \"{}\"", name, descriptor, self.this_class)).clone()
+    }
+
+    pub fn has_method(&self, name: &str, descriptor: &str) -> bool {
+        if self.method_map.contains_key(name) {
+            if self.method_map.get(name).unwrap().contains_key(descriptor) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 }
 
@@ -34,10 +50,18 @@ pub struct ObjectField {
     pub info: FieldInfo
 }
 
+#[derive(PartialEq, Eq)]
+pub enum RefInfoType {
+    MethodRef,
+    FieldRef,
+    InterfaceMethodRef
+}
+
 pub struct RefInfo {
     pub class_name: String,
     pub name: String,
     pub descriptor: String,
+    pub info_type: RefInfoType
 }
 
 pub struct ConstantPool {
@@ -92,6 +116,7 @@ impl ConstantPool {
                     class_name: class.clone(),
                     name: name_and_type.0.clone(),
                     descriptor: name_and_type.1.clone(),
+                    info_type: RefInfoType::MethodRef
                 }
             },
             Constant::FieldRef(class_index, name_and_type_index) => {
@@ -102,6 +127,7 @@ impl ConstantPool {
                     class_name: class.clone(),
                     name: name_and_type.0.clone(),
                     descriptor: name_and_type.1.clone(),
+                    info_type: RefInfoType::FieldRef
                 }
             },
             Constant::InterfaceMethodRef(class_index, name_and_type_index) => {
@@ -112,6 +138,7 @@ impl ConstantPool {
                     class_name: class.clone(),
                     name: name_and_type.0.clone(),
                     descriptor: name_and_type.1.clone(),
+                    info_type: RefInfoType::InterfaceMethodRef
                 }
             },
             _ => panic!("Constant did not resolve to a Methodref, fieldref, or InterfaceMethodRef!")
@@ -141,8 +168,12 @@ pub enum AccessFlags {
 }
 
 impl AccessFlags {
-    pub fn is_native(flags: &u16) -> bool {
+    pub fn is_native(flags: u16) -> bool {
         flags & 0x100 == 0x100
+    }
+
+    pub fn is_protected(flags: u16) -> bool {
+        flags & 0x4 == 0x4
     }
 }
 
@@ -196,6 +227,38 @@ impl FieldDescriptor {
         }
 
         panic!(format!("Malformed field descriptor {}", desc));
+    }
+
+    pub fn matches_operand(&self, operand: OperandType) -> bool {
+        match self {
+            FieldDescriptor::BaseType(bt) => {
+                match bt {
+                    BaseType::Byte => operand == OperandType::Int,
+                    BaseType::Char => operand == OperandType::Char,
+                    BaseType::Double => operand == OperandType::Double,
+                    BaseType::Float => operand == OperandType::Float,
+                    BaseType::Int => operand == OperandType::Int,
+                    BaseType::Long => operand == OperandType::Long,
+                    BaseType::Reference => unreachable!("BaseType should not parse to a reference."),
+                    BaseType::Bool => operand == OperandType::Int,
+                    BaseType::Short => operand == OperandType::Int
+                }
+            }
+            FieldDescriptor::ObjectType(_) => {
+                if operand == OperandType::ClassReference {
+                    true
+                } else {
+                    false
+                }
+            }
+            FieldDescriptor::ArrayType(_) => {
+                if operand == OperandType::ArrayReference {
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 }
 
