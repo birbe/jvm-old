@@ -288,7 +288,15 @@ impl MethodDescriptor {
                 parameters.push(FieldDescriptor::parse(&input[pos..pos+1]));
                 pos += 1;
             } else {
-                let end = (&input[pos..]).find(";").unwrap() + pos;
+                let desc_end;
+                let semicolon = (&input[pos..]).find(";");
+                if semicolon.is_none() {
+                    desc_end = params_end;
+                } else {
+                    desc_end = semicolon.unwrap();
+                }
+
+                let end = desc_end + pos;
                 parameters.push(FieldDescriptor::parse(&input[pos..=end]));
                 pos = end+1;
             }

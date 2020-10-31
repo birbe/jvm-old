@@ -20,8 +20,9 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        Main main = new Main();
-        String thingy = main.idk();
-        print_string(thingy);
+        char[] array = new char[50000];
+        for(int i=0;i<50000;i++) {
+            array[i] = 80;
+        }
     }
 }
