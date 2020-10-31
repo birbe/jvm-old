@@ -20,9 +20,6 @@ public class Main {
     }
 
     public static void main(String[] args) {
-        char[] array = new char[50000];
-        for(int i=0;i<50000;i++) {
-            array[i] = 80;
-        }
+        print_string("Hello world!");
     }
 }
