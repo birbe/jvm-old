@@ -1,11 +1,20 @@
 [package]
-name = "jvm"
+name = "jvm-rust"
 version = "0.1.0"
 authors = ["Birb <erik_blair@outlook.com>"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-byteorder = "1.3.4"
-hashbrown = "0.3"
+[[bin]]
+name = "jvm-test"
+path = "jvm-test/src/main.rs"
+test = true
+
+[workspace]
+
+members = [
+    "jvm-test",
+    "wasm",
+    "jvm"
+]

@@ -1118,11 +1118,11 @@ impl RuntimeThread {
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor);
 
                 // if AccessFlags::is_protected(method.access_flags) {
-                //     let is_superclass = vm.recurse_is_superclass(frame.class.clone(), &method_ref.class_name);
+                //     let is_superclass = jvm.recurse_is_superclass(frame.class.clone(), &method_ref.class_name);
                 //     let are_siblings = VirtualMachine::are_classpaths_siblings(&frame.class.this_class, &method_ref.class_name);
                 //
                 //     if is_superclass && !are_siblings {
-                //         if frame.class.this_class != object_info.class.this_class && !vm.recurse_is_superclass(vm.get_class(&object_info.class.this_class).clone(), &frame.class.this_class) {
+                //         if frame.class.this_class != object_info.class.this_class && !jvm.recurse_is_superclass(jvm.get_class(&object_info.class.this_class).clone(), &frame.class.this_class) {
                 //             // panic!("AbstractMethodError");
                 //         }
                 //     }
@@ -1242,11 +1242,11 @@ impl RuntimeThread {
                 ]);
 
                 // if AccessFlags::is_protected(method.access_flags) {
-                //     let is_superclass = vm.recurse_is_superclass(&frame.class, &method_ref.class_name);
+                //     let is_superclass = jvm.recurse_is_superclass(&frame.class, &method_ref.class_name);
                 //     let are_siblings = VirtualMachine::are_sibling_classes(&frame.class.this_class, &method_ref.class_name);
                 //
                 //     if is_superclass && !are_siblings {
-                //         if frame.class.this_class != object_info.class && !vm.recurse_is_superclass(&vm.get_class(&object_info.class), &frame.class.this_class) {
+                //         if frame.class.this_class != object_info.class && !jvm.recurse_is_superclass(&jvm.get_class(&object_info.class), &frame.class.this_class) {
                 //             panic!("Uhh what");
                 //         }
                 //     }

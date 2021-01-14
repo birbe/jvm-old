@@ -1,8 +1,8 @@
-extern crate jvm;
+use jvm;
 
-use jvm::vm::vm::{VirtualMachine};
 use std::fs;
 use std::env::current_dir;
+
 use std::time::SystemTime;
 
 fn main() {
