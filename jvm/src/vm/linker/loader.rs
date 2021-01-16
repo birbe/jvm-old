@@ -1,14 +1,266 @@
 use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::vm::class::constant::{Constant};
-use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool};
+use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool, MethodDescriptor, ArrayType, MethodReturnType};
 use crate::vm::class::attribute::{Attribute};
 use std::collections::HashMap;
 use crate::vm::class::FieldDescriptor;
 use std::mem::size_of;
 use std::rc::Rc;
+use std::path::PathBuf;
+use std::iter::FromIterator;
+use std::ops::Deref;
+use std::fs;
+use crate::vm::vm::OperandType::ClassReference;
+use std::sync::RwLock;
 
-pub fn load_class(bytes: Vec<u8>) -> Class {
+pub enum ClassLoadState {
+    Unloaded,
+    Loading,
+    Loaded(Rc<Class>)
+}
+
+impl ClassLoadState {
+
+    pub fn unwrap(&self) -> Rc<Class> {
+        match self {
+            ClassLoadState::Unloaded => panic!("Cannot unwrap an unloaded class."),
+            ClassLoadState::Loading => panic!("Cannot unwrap a class that is being loaded."),
+            ClassLoadState::Loaded(class) => class.clone()
+        }
+    }
+
+}
+
+pub struct ClassLoader {
+    pub class_map: HashMap<String, ClassLoadState>,
+    classpath_root: PathBuf
+}
+
+impl ClassLoader {
+
+    pub fn new(classpath_root: PathBuf) -> Self {
+        Self {
+            class_map: HashMap::new(),
+            classpath_root
+        }
+    }
+
+    pub fn get_class(&self, classpath: &str) -> Option<Rc<Class>> {
+        Option::Some(self.class_map.get(classpath)?.unwrap())
+    }
+
+    pub fn is_class_linked(&self, classpath: &str) -> bool {
+        let class = self.class_map.get(classpath);
+        if class.is_none() {
+            false
+        } else {
+            if let ClassLoadState::Loaded(_) = class.unwrap() {
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    fn load_link_field_descriptor(&mut self, fd: &FieldDescriptor) {
+         match fd {
+             FieldDescriptor::BaseType(_) => {},
+             FieldDescriptor::ObjectType(obj_classpath) => { self.load_and_link_class(&obj_classpath); },
+             FieldDescriptor::ArrayType(at) => {
+                 match &*at.field_descriptor {
+                     FieldDescriptor::ObjectType(obj_classpath) => { self.load_and_link_class(&obj_classpath); },
+                     _ => {}
+                 }
+             }
+         }
+    }
+
+    pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Rc<Class>), ClassLoadState> {
+        let maybe = self.class_map.get(classpath);
+
+        if maybe.is_some() {
+            match maybe.unwrap() {
+                ClassLoadState::Unloaded => {}
+                ClassLoadState::Loading => return Result::Err(ClassLoadState::Loading),
+                ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap()))
+            }
+        }
+
+        let split_classpath = classpath.split("/");
+        let mut physical_classpath = PathBuf::new();
+
+        for x in split_classpath {
+            physical_classpath = physical_classpath.join(x);
+        }
+        physical_classpath.set_extension("class");
+
+        let real_path = self.classpath_root.join(physical_classpath);
+
+        let bytes = fs::read(real_path).unwrap();
+
+        // self.loaded_classes.insert(String::from(classpath), true);
+        self.class_map.insert(String::from(classpath), ClassLoadState::Loading);
+
+        let mut class = load_class(bytes, 4, 4);
+
+        if !self.is_class_linked(&class.super_class) {
+            if class.super_class != "" {
+                self.load_and_link_class(&*String::from(&class.super_class));
+            }
+        }
+
+        if class.super_class != "" {
+            // println!("Getting superclass {} of {}", &class.super_class, classpath);
+            let superclass = self.get_class(&class.super_class).unwrap();
+            class.full_heap_size = class.heap_size + superclass.full_heap_size;
+        }
+
+        for constant in class.constant_pool.get_vec().iter() {
+            match constant {
+                Constant::Class(utf8) => {
+                    let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
+                    self.load_and_link_class(name);
+                },
+                Constant::FieldRef(class_name, name_and_type) => {
+                    self.load_and_link_class(class.constant_pool.resolve_class_info(*class_name).unwrap());
+
+                    let (_, descriptor) = class.constant_pool.resolve_name_and_type(*name_and_type).unwrap();
+                    let fd = FieldDescriptor::parse(descriptor);
+
+                    self.load_link_field_descriptor(&fd);
+                }
+                Constant::MethodRef(class_name, name_and_type) => {
+                    self.load_and_link_class(class.constant_pool.resolve_class_info(*class_name).unwrap());
+
+                    let (_, descriptor) = class.constant_pool.resolve_name_and_type(*name_and_type).unwrap();
+                    let md = MethodDescriptor::parse(descriptor);
+
+                    match md.return_type {
+                        MethodReturnType::Void => {}
+                        MethodReturnType::FieldDescriptor(fd) => self.load_link_field_descriptor(&fd)
+                    }
+
+                    for param in md.parameters.iter() {
+                        self.load_link_field_descriptor(param);
+                    }
+                },
+                Constant::InterfaceMethodRef(_, _) => {}
+                Constant::NameAndType(_, _) => {}
+                Constant::MethodHandle(_, _) => {}
+                Constant::MethodType(_) => {}
+                Constant::InvokeDynamic(_, _) => {}
+                _ => {}
+            }
+        }
+
+        self.class_map.insert(String::from(classpath), ClassLoadState::Loaded(Rc::new(class)));
+
+        let rc = self.class_map.get(classpath).unwrap().unwrap();
+
+        for (_, info) in rc.field_map.iter() {
+            match &info.info.field_descriptor {
+                FieldDescriptor::ObjectType(fd_classpath) => { self.load_and_link_class(fd_classpath); },
+                FieldDescriptor::ArrayType(array_type) => {
+                    if let FieldDescriptor::ObjectType(fd_classpath) = array_type.field_descriptor.deref() {
+                        self.load_and_link_class(&fd_classpath);
+                    }
+                },
+                FieldDescriptor::BaseType(_) => {}
+            }
+        }
+
+        Result::Ok((
+            true,
+            rc
+        ))
+    }
+
+    pub fn recurse_is_superclass(&self, subclass: Rc<Class>, superclass_cpath: &str) -> bool {
+        if subclass.this_class == superclass_cpath {
+            false
+        } else if superclass_cpath == "java/lang/Object" && subclass.this_class != "java/lang/Object" {
+            true
+        } else if subclass.super_class == superclass_cpath {
+            true
+        } else if subclass.super_class == "java/lang/Object" && superclass_cpath != "java/lang/Object" {
+            false
+        } else {
+            let superclass = self.get_class(&subclass.super_class).unwrap();
+            self.recurse_is_superclass(
+                superclass,
+                superclass_cpath
+            )
+        }
+    }
+
+    pub fn recurse_resolve_overridding_method(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
+        let superclass = self.get_class(&subclass.super_class).unwrap();
+
+        if subclass.has_method(name, descriptor) {
+            let m1 = subclass.get_method(name, descriptor);
+            let m2 = superclass.get_method(name, descriptor);
+
+            if {
+                (m2.access_flags & 0x1 == 0x1) || (m2.access_flags & 0x4 == 0x4)
+                    || (
+                    !((m2.access_flags & 0x1 == 0x1) && (m2.access_flags & 0x2 == 0x2) && (m2.access_flags & 0x4 == 0x4))
+                        && are_classpaths_siblings(&subclass.this_class, &superclass.this_class)
+                )
+            } {
+                return Option::Some( (subclass, m1) );
+            } else {
+                if superclass.super_class != "" {
+                    return self.recurse_resolve_overridding_method(
+                        superclass,
+                        name,
+                        descriptor
+                    );
+                } else { //No superclass
+                    return Option::None;
+                }
+            }
+        }
+
+        return Option::None;
+    }
+
+    pub fn recurse_resolve_supermethod_special(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
+        if subclass.super_class == "" {
+            return Option::None;
+        }
+
+        let superclass = self.get_class(&subclass.super_class)?;
+
+        if superclass.has_method(name, descriptor) {
+            Option::Some(
+                (superclass.clone(), superclass.get_method(name, descriptor))
+            )
+        } else {
+            self.recurse_resolve_supermethod_special(superclass, name, descriptor)
+        }
+    }
+
+}
+
+pub fn are_classpaths_siblings(a: &str, b: &str) -> bool {
+    let split_a = Vec::from_iter(a.split("/").map(String::from));
+    let split_b = Vec::from_iter(b.split("/").map(String::from));
+
+    if split_a.len() != split_b.len() {
+        false
+    } else {
+        for elem in 0..split_a.len()-1 {
+            if split_a.get(elem).unwrap() != split_b.get(elem).unwrap() {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+pub fn load_class(bytes: Vec<u8>, ptr_len: u8, minimum: u8) -> Class {
     let mut rdr = Cursor::new(bytes);
 
     let magic = rdr.read_u32::<BigEndian>().unwrap();
@@ -92,17 +344,17 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
     for _ in 0..field_count {
         let field = FieldInfo::from_bytes(&mut rdr, &constant_pool);
 
-        let size = match &field.field_descriptor {
+        let size = (match &field.field_descriptor {
             FieldDescriptor::BaseType(b_type) => {
-                BaseType::size_of(b_type)
+                BaseType::size_of(b_type, ptr_len, minimum)
             },
             FieldDescriptor::ObjectType(_) => {
-                size_of::<usize>()
+                (ptr_len / minimum) as usize
             },
             FieldDescriptor::ArrayType(_) => {
-                size_of::<usize>()
+                (ptr_len / minimum) as usize
             }
-        } as isize;
+        }) as isize;
 
         heap_size += size as usize;
         new_offset += size;
@@ -156,6 +408,7 @@ pub fn load_class(bytes: Vec<u8>) -> Class {
         method_map,
         attribute_map,
         heap_size,
-        full_heap_size: heap_size
+        full_heap_size: heap_size,
+        static_been_seen: Rc::new(RwLock::new(false))
     }
 }

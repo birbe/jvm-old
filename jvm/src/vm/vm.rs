@@ -1,6 +1,6 @@
 use crate::vm::class::{Class, FieldDescriptor, MethodDescriptor, AccessFlags, RefInfoType, Method, MethodReturnType, ArrayType};
 use std::collections::HashMap;
-use crate::vm::linker::loader::load_class;
+use crate::vm::linker::loader::{load_class, ClassLoader, are_classpaths_siblings, ClassLoadState};
 use std::{fs, mem};
 use std::path::{PathBuf};
 use std::ops::{Deref};
@@ -17,137 +17,35 @@ use std::mem::size_of;
 use core::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::iter::FromIterator;
+use crate::vm::heap::{Heap, InternArrayType, Type, Reference, ObjectInfo};
+use std::sync::Mutex;
 
 static mut BENCHMARKS: u16 = 0;
-
-pub enum InternArrayType {
-    Char,
-    Int,
-    Float,
-    Long,
-    Double,
-
-    NullReference,
-    InterfaceReference,
-    ClassReference,
-    ArrayReference,
-    UnknownReference
-}
-
-#[repr(C)]
-pub struct ArrayHeader {
-    pub id: u8,
-    pub size: u16
-}
-
-impl InternArrayType {
-    pub fn convert_to_u8(t: InternArrayType) -> u8 {
-        match t {
-            InternArrayType::Char => 0,
-            InternArrayType::Int => 1,
-            InternArrayType::Float => 2,
-            InternArrayType::Long => 3,
-            InternArrayType::Double => 4,
-            InternArrayType::NullReference => 5,
-            InternArrayType::InterfaceReference => 6,
-            InternArrayType::ClassReference => 7,
-            InternArrayType::ArrayReference => 8,
-            InternArrayType::UnknownReference => 9
-        }
-    }
-    
-    pub fn from_u8(t: u8) -> InternArrayType {
-        match t {
-            0 => InternArrayType::Char,
-            1 => InternArrayType::Int,
-            2 => InternArrayType::Float,
-            3 => InternArrayType::Long,
-            4 => InternArrayType::Double,
-            5 => InternArrayType::NullReference,
-            6 => InternArrayType::InterfaceReference,
-            7 => InternArrayType::ClassReference,
-            8 => InternArrayType::ArrayReference,
-            9 => InternArrayType::UnknownReference,
-            _ => panic!(format!("Invalid array type [{}] from u8!", t))
-        }
-    }
-
-    pub fn from_type(t: Type) -> InternArrayType {
-        match t {
-            Type::Char(_) => InternArrayType::Char,
-            Type::Int(_) => InternArrayType::Int,
-            Type::Float(_) => InternArrayType::Float,
-            Type::LongHalf(_) => InternArrayType::Long,
-            Type::DoubleHalf(_) => InternArrayType::Double,
-            Type::Reference(r) => {
-                match r {
-                    Reference::Interface(_) => InternArrayType::InterfaceReference,
-                    Reference::Null => panic!("Cannot use null as an array type!"),
-                    Reference::Class(_) => InternArrayType::ClassReference,
-                    Reference::Array(_) => InternArrayType::ArrayReference
-                }
-            }
-        }
-    }
-
-    pub fn size_of(t: InternArrayType) -> usize {
-        match t {
-            InternArrayType::Char => 16,
-            InternArrayType::Int => 32,
-            InternArrayType::Float => 32,
-            InternArrayType::Long => 64,
-            InternArrayType::Double => 64,
-            InternArrayType::NullReference => size_of::<usize>(),
-            InternArrayType::InterfaceReference => size_of::<usize>(),
-            InternArrayType::ClassReference => size_of::<usize>(),
-            InternArrayType::ArrayReference => size_of::<usize>(),
-            InternArrayType::UnknownReference => size_of::<usize>()
-        }
-    }
-}
-
-pub struct ObjectInfo {
-    class: Rc<Class>,
-    ptr: *mut u8
-}
 
 pub struct VirtualMachine {
     pub start_time: SystemTime,
 
-    threads: HashMap<String, Rc<RefCell<RuntimeThread>>>,
-    pub classes_map: HashMap<String, Rc<Class>>,
-    pub class_info_map: HashMap<String, Rc<Class>>,
-    loaded_classes: HashMap<String, bool>,
-    strings: HashMap<String, usize>,
-    classpath_root: PathBuf,
+    pub threads: HashMap<String, RuntimeThread>,
 
-    pub objects: Vec<ObjectInfo>,
-    available_object_ids: Vec<usize>
+    pub class_loader: Rc<RefCell<ClassLoader>>,
+
+    pub heap: Rc<RefCell<Heap>>,
 }
 
 impl VirtualMachine {
-    pub fn new(classpath_root: PathBuf) -> Rc<RefCell<VirtualMachine>> {
-        Rc::new(RefCell::new(VirtualMachine {
+    pub fn new(classpath_root: PathBuf) -> VirtualMachine {
+        VirtualMachine {
             threads: HashMap::new(),
-            classes_map: HashMap::new(),
-            class_info_map: HashMap::new(),
-            loaded_classes: HashMap::new(),
-            strings: HashMap::new(),
-            classpath_root,
             start_time: SystemTime::now(),
 
-            objects: Vec::new(),
-            available_object_ids: Vec::new()
-        }))
+            class_loader: Rc::new(RefCell::new(ClassLoader::new(classpath_root))),
+            heap: Rc::new(RefCell::new(Heap::new()))
+        }
     }
 
-    pub fn get_class(&self, classpath: &str) -> Rc<Class> {
-        self.classes_map.get(classpath).expect(&*format!("Tried to get class {}", classpath)).clone()
-    }
+    pub fn spawn_thread(&mut self, name: String, method_name: &str, method_descriptor: &str, class: Rc<Class>, args: Vec<String>) -> &RuntimeThread {
 
-    pub fn spawn_thread(rc: Rc<RefCell<VirtualMachine>>, mut vm: RefMut<VirtualMachine>, name: String, method_name: &str, method_descriptor: &str, class: Rc<Class>, args: Vec<String>) -> Rc<RefCell<RuntimeThread>> {
-
-        let mut thread = RuntimeThread::new(String::from(&name), rc);
+        let mut thread = RuntimeThread::new(String::from(&name), self.heap.clone(), self.class_loader.clone());
 
         let mut frame = RuntimeThread::create_frame(
             class.get_method(method_name, method_descriptor),
@@ -156,14 +54,14 @@ impl VirtualMachine {
 
         let mut index: u16 = 0;
 
-        let string_arr_ptr = VirtualMachine::allocate_array(InternArrayType::ClassReference, args.len());
+        let string_arr_ptr = Heap::allocate_array(InternArrayType::ClassReference, args.len());
 
-        let (header, body) = unsafe { VirtualMachine::get_array::<usize>(string_arr_ptr as *mut u8) };
+        let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
 
         frame.local_vars.insert(0, vec![ Type::Reference(Reference::Array(header as *mut u8)) ]);
 
         for arg in args.iter() {
-            let str = RuntimeThread::create_string(&mut vm, arg);
+            let str = self.heap.borrow_mut().create_string(arg, self.class_loader.borrow().get_class("java/lang/String").unwrap());
 
             unsafe {
                 *body.offset(size_of::<usize>() as isize * index as isize) = str as usize;
@@ -176,383 +74,9 @@ impl VirtualMachine {
             frame
         );
 
-        vm.threads.insert(String::from(&name),
-                          Rc::new(RefCell::new(thread)));
-        vm.threads.get(&name).unwrap().clone()
+        self.threads.insert(String::from(&name), thread);
 
-    }
-
-    pub fn is_class_linked(&self, classpath: &str) -> bool {
-        self.loaded_classes.contains_key(classpath)
-    }
-
-    pub fn load_and_link_class(&mut self, classpath: &str) -> (bool, Rc<Class>) {
-        if self.is_class_linked(&classpath) {
-            return (
-                false,
-                self.classes_map.get(classpath).unwrap().clone()
-            );
-        } //Exit case
-
-        let split_classpath = classpath.split("/");
-        let mut physical_classpath = PathBuf::new();
-
-        for x in split_classpath {
-            physical_classpath = physical_classpath.join(x);
-        }
-        physical_classpath.set_extension("class");
-
-        let real_path = self.classpath_root.join(physical_classpath);
-
-        let bytes = fs::read(real_path).unwrap();
-
-        self.loaded_classes.insert(String::from(classpath), true);
-
-        let mut class = load_class(bytes);
-
-        if !self.is_class_linked(&class.super_class) {
-            if class.super_class != "" {
-                self.load_and_link_class(&*String::from(&class.super_class));
-            }
-        }
-
-        if class.super_class != "" {
-            // println!("Getting superclass {} of {}", &class.super_class, classpath);
-            let superclass = self.get_class(&class.super_class);
-            class.full_heap_size = class.heap_size + superclass.full_heap_size;
-        }
-
-        self.classes_map.insert(String::from(classpath), Rc::new(class));
-
-        let rc = self.classes_map.get(classpath).unwrap().clone();
-
-        for (_, info) in rc.field_map.iter() {
-            match &info.info.field_descriptor {
-                FieldDescriptor::ObjectType(fd_classpath) => { self.load_and_link_class(fd_classpath); },
-                FieldDescriptor::ArrayType(array_type) => {
-                    if let FieldDescriptor::ObjectType(fd_classpath) = array_type.field_descriptor.deref() {
-                        self.load_and_link_class(&fd_classpath);
-                    }
-                },
-                FieldDescriptor::BaseType(_) => {}
-            }
-        }
-
-        (
-            true,
-            rc
-        )
-    }
-
-    pub fn allocate_class(class: Rc<Class>) -> *mut u8 {
-        unsafe {
-            //Make a layout with the exact size of the object
-            let layout = Layout::from_size_align(class.full_heap_size, 2).unwrap();
-            //Allocate
-            alloc(layout)
-        }
-    }
-
-    pub fn deallocate_class(class: Rc<Class>, ptr: *mut u8) {
-        unsafe {
-            let layout = Layout::from_size_align(class.full_heap_size, 2).unwrap();
-
-            dealloc(ptr, layout);
-        }
-    }
-
-    pub fn create_object(&mut self, class: Rc<Class>) -> usize {
-        let info = ObjectInfo {
-            ptr: VirtualMachine::allocate_class(class.clone()),
-            class: class.clone()
-        };
-
-        if self.available_object_ids.is_empty() {
-            self.objects.push(
-                info
-            );
-        } else {
-            self.objects.insert(
-                self.available_object_ids.pop().unwrap(),
-                info
-            );
-        }
-
-        self.objects.len()-1
-    }
-
-    pub fn destroy_object(&mut self, id: usize) {
-        let info = self.objects.remove(id);
-
-        VirtualMachine::deallocate_class(info.class.clone(), info.ptr);
-
-        if id < self.objects.len() { //There's an empty space somewhere in the Vec that can be used
-            self.available_object_ids.push(id);
-        }
-    }
-
-    pub fn put_field<T>(&self, id: usize, class: Rc<Class>, field: &str, value: T) {
-        let ptr = self.objects.get(id).unwrap().ptr;
-
-        let field_offset = class.field_map.get(
-            field
-        );
-
-        unsafe {
-            let offset_ptr = ptr.offset(
-                field_offset.unwrap().offset as isize
-            ) as *mut T;
-
-            *offset_ptr = value;
-        }
-    }
-
-    pub fn get_field<T>(&self, id: usize, class: Rc<Class>, field: &str) -> *mut T {
-        unsafe {
-            let ptr = self.objects.get(id).unwrap().ptr;
-
-            let offset_ptr = ptr.offset(
-                class.field_map.get(
-                    field
-                ).unwrap().offset as isize
-            ) as *mut T;
-
-            offset_ptr
-        }
-    }
-
-    pub fn allocate_array(intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
-        let id = InternArrayType::convert_to_u8(intern_type);
-
-        let header = Layout::new::<ArrayHeader>();
-        let body = Layout::array::<u8>(length).unwrap();
-
-        let (layout, offset) = header.extend(body).unwrap();
-
-        assert_eq!(offset, mem::size_of::<ArrayHeader>());
-        assert!(length < u16::MAX as usize);
-
-        unsafe {
-            let ptr = alloc(layout);
-
-            if ptr.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
-
-            let header = ptr.cast::<ArrayHeader>();
-            (*header).id = id;
-            (*header).size = length as u16;
-
-            ptr.cast::<ArrayHeader>()
-        }
-    }
-    
-    pub fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {
-        let header_ptr = ptr.cast::<ArrayHeader>();
-        // let body_ptr = header_ptr.offset(size_of::<ArrayHeader<T>>() as isize).cast::<T>();
-        let body_ptr = unsafe { header_ptr.offset(1).cast::<T>() };
-
-        (
-            header_ptr,
-            body_ptr
-        )
-    }
-
-    pub fn allocate_chars(&mut self, string: &str) -> *mut ArrayHeader {
-        unsafe {
-            let header = VirtualMachine::allocate_array(InternArrayType::Char, string.len());
-
-            let (arr_header, arr_body) = VirtualMachine::get_array::<u8>(header as *mut u8);
-
-            ptr::copy(string.as_bytes().as_ptr(), arr_body, string.as_bytes().len());
-
-            arr_header
-        }
-    }
-
-    pub fn invoke_native(&self, name: &str, class: Rc<Class>, mut argument_ops: Vec<Operand>) -> Option<Vec<Operand>> {
-        let full_name = format!("{}_{}", class.this_class.replace("/","_"),name.to_ascii_lowercase());
-
-        match full_name.as_str() {
-            "Main_print_int" => {
-                println!("Main_print_int({})", argument_ops.pop().unwrap().1);
-
-                Option::None
-            },
-            "Main_print_string" => {
-                let string_reference = argument_ops.pop().unwrap().1;
-
-                let chars_ptr = self.get_field::<usize>(string_reference, self.get_class("java/lang/String"), "chars");
-                let mut string_bytes: Vec<u8> = Vec::new();
-
-                unsafe {
-                    let (header, body) = VirtualMachine::get_array::<u8>(*chars_ptr as *mut u8);
-                    let length = (*header).size;
-
-                    for i in 0..length {
-                        let char = *(body.offset(
-                            // (length as isize - i as isize - 1)
-                            (i as isize) * size_of::<u8>() as isize
-                        ));
-                        string_bytes.push(char);
-                    }
-
-                    let str = String::from_utf8(string_bytes).unwrap();
-                    eprintln!("{}", str);
-
-                    Option::None
-                }
-            },
-            "Main_get_time" => {
-
-                let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-
-                let half1 = ((epoch >> 32) & 0xFFFFFFFFF) as u32;
-                let half2 = (epoch & 0xFFFFFFFFF) as u32;
-
-                let ops_out: Vec<Operand> = vec![
-                    Operand(OperandType::Long, half1 as usize),
-                    Operand(OperandType::Long, half2 as usize)
-                ];
-
-                Option::Some(ops_out)
-            },
-            "Main_get_int" => {
-                Option::Some(vec![
-                    Operand(OperandType::Int, 1)
-                ])
-            },
-            "Main_print_benchmark" => unsafe {
-                BENCHMARKS += 1;
-                println!("Benchmark {}: {}", BENCHMARKS, SystemTime::now().duration_since(self.start_time).unwrap().as_millis());
-
-                Option::None
-            },
-            _ => unimplemented!("Unimplemented native method \"{}\"", full_name)
-        }
-    }
-
-    pub fn are_classpaths_siblings(a: &str, b: &str) -> bool {
-        let split_a = Vec::from_iter(a.split("/").map(String::from));
-        let split_b = Vec::from_iter(b.split("/").map(String::from));
-
-        if split_a.len() != split_b.len() {
-            false
-        } else {
-            for elem in 0..split_a.len()-1 {
-                if split_a.get(elem).unwrap() != split_b.get(elem).unwrap() {
-                    return false;
-                }
-            }
-
-            true
-        }
-    }
-
-    pub fn recurse_is_superclass(&self, subclass: Rc<Class>, superclass_cpath: &str) -> bool {
-        if subclass.this_class == superclass_cpath {
-            false
-        } else if superclass_cpath == "java/lang/Object" && subclass.this_class != "java/lang/Object" {
-            true
-        } else if subclass.super_class == superclass_cpath {
-            true
-        } else if subclass.super_class == "java/lang/Object" && superclass_cpath != "java/lang/Object" {
-            false
-        } else {
-            let superclass = self.get_class(&subclass.super_class);
-            self.recurse_is_superclass(
-                superclass.clone(),
-                superclass_cpath
-            )
-        }
-    }
-
-    pub fn recurse_resolve_overridding_method(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
-        let superclass = self.get_class(&subclass.super_class);
-
-        if subclass.has_method(name, descriptor) {
-            let m1 = subclass.get_method(name, descriptor);
-            let m2 = superclass.get_method(name, descriptor);
-
-            if {
-                (m2.access_flags & 0x1 == 0x1) || (m2.access_flags & 0x4 == 0x4)
-                    || (
-                    !((m2.access_flags & 0x1 == 0x1) && (m2.access_flags & 0x2 == 0x2) && (m2.access_flags & 0x4 == 0x4))
-                        && Self::are_classpaths_siblings(&subclass.this_class, &superclass.this_class)
-                )
-            } {
-                return Option::Some( (subclass, m1) );
-            } else {
-                if superclass.super_class != "" {
-                    return self.recurse_resolve_overridding_method(
-                        superclass,
-                        name,
-                        descriptor
-                    );
-                } else { //No superclass
-                    return Option::None;
-                }
-            }
-        }
-
-        return Option::None;
-    }
-
-    pub fn recurse_resolve_supermethod_special(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
-        if subclass.super_class == "" {
-            return Option::None;
-        }
-
-        let superclass = self.get_class(&subclass.super_class);
-
-        if superclass.has_method(name, descriptor) {
-            Option::Some(
-                (superclass.clone(), superclass.get_method(name, descriptor))
-            )
-        } else {
-            self.recurse_resolve_supermethod_special(superclass, name, descriptor)
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum Type {
-    Char(u16),
-    Int(i32),
-    Float(f32),
-    LongHalf(u32),
-    DoubleHalf(u32),
-    Reference(Reference)
-}
-
-impl Type {
-    pub fn as_operand(t: Type) -> Operand {
-        match t {
-            Type::Char(c) => Operand(OperandType::Char, c as usize),
-            Type::Int(i) => Operand(OperandType::Int, i as usize),
-            Type::Float(f) => Operand(OperandType::Float, f as usize),
-            Type::LongHalf(h) => Operand(OperandType::Long, h as usize),
-            Type::DoubleHalf(h) => Operand(OperandType::Double, h as usize),
-            Type::Reference(r) => {
-                match r {
-                    Reference::Class(ptr) => Operand(OperandType::ClassReference, ptr as usize),
-                    Reference::Null => Operand(OperandType::NullReference, 0),
-                    Reference::Interface(ptr) => Operand(OperandType::InterfaceReference, ptr as usize),
-                    Reference::Array(ptr) => Operand(OperandType::ArrayReference, ptr as usize)
-                }
-            }
-        }
-    }
-
-    pub fn get_size(t: Type) -> usize {
-        match t {
-            Type::Char(_) => size_of::<u16>(),
-            Type::Int(_) => size_of::<i32>(),
-            Type::Float(_) => size_of::<f32>(),
-            Type::LongHalf(_) => size_of::<u32>(),
-            Type::DoubleHalf(_) => size_of::<u32>(),
-            Type::Reference(_) => size_of::<usize>() //Size of a null reference should never be checked, so this is a fair assumption.
-        }
+        self.threads.get(&name).unwrap()
     }
 }
 
@@ -603,7 +127,7 @@ impl Clone for OperandType {
     }
 }
 
-pub struct Operand (OperandType, usize);
+pub struct Operand (pub OperandType, pub usize);
 
 impl Clone for Operand {
     fn clone(&self) -> Self {
@@ -641,14 +165,6 @@ impl Operand {
             OperandType::ArrayReference => 1
         }
     }
-}
-
-#[derive(Debug)]
-pub enum Reference {
-    Null,
-    Interface(*mut u8),
-    Class(usize),
-    Array(*mut u8)
 }
 
 pub struct LocalVariableMap {
@@ -689,15 +205,19 @@ pub struct Frame {
 }
 
 pub struct RuntimeThread {
-    vm: Rc<RefCell<VirtualMachine>>,
+    heap: Rc<RefCell<Heap>>,
+    classloader: Rc<RefCell<ClassLoader>>,
+
     thread_name: String,
     stack: Vec<Frame>
 }
 
 impl RuntimeThread {
-    pub fn new(name: String, vm: Rc<RefCell<VirtualMachine>>) -> RuntimeThread {
+    pub fn new(name: String, heap: Rc<RefCell<Heap>>, classloader: Rc<RefCell<ClassLoader>>) -> RuntimeThread {
         RuntimeThread {
-            vm,
+            heap,
+            classloader,
+
             thread_name: name,
             stack: Vec::new()
         }
@@ -723,37 +243,16 @@ impl RuntimeThread {
         self.stack.push(frame)
     }
 
-    pub fn create_string(vm: &mut RefMut<VirtualMachine>, string: &str) -> usize {
-        let (_, str_class) = vm.load_and_link_class("java/lang/String");
-
-        if vm.strings.contains_key(string) {
-            return *vm.strings.get(string).unwrap();
-        }
-
-        let id = vm.create_object(str_class.clone());
-        let chars_ptr = VirtualMachine::allocate_chars(vm, string);
-
-        vm.put_field::<usize>(
-            id,
-            str_class.clone(),
-            "chars",
-            chars_ptr as usize
-        );
-
-        vm.strings.insert(String::from(string), id);
-
-        id
-    }
-
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> Result<(), std::io::Error> {
         let mut pending_frames: Option<Vec<Frame>> = Option::None;
 
         let frame = self.stack.last_mut().unwrap();
 
-        let mut vm = (&*self.vm).borrow_mut();
-
         let opcode_pos = frame.code.position();
-        let opcode = frame.code.read_u8().unwrap();
+        let opcode = frame.code.read_u8()?;
+        
+        let mut heap = self.heap.borrow_mut();
+        let classloader = self.classloader.borrow();
 
         match opcode {
             0x0 => (), //nop, do nothing
@@ -768,11 +267,11 @@ impl RuntimeThread {
                 frame.op_stack.push(Operand(OperandType::Double, 0 ));
                 frame.op_stack.push(Operand(OperandType::Double, (opcode-0xe) as usize));
             },
-            0x10 => frame.op_stack.push(Operand(OperandType::Int, frame.code.read_u8().unwrap() as usize)), //bipush
-            0x11 => frame.op_stack.push(Operand(OperandType::Int, frame.code.read_u16::<BigEndian>().unwrap() as usize)), //sipush
+            0x10 => frame.op_stack.push(Operand(OperandType::Int, frame.code.read_u8()? as usize)), //bipush
+            0x11 => frame.op_stack.push(Operand(OperandType::Int, frame.code.read_u16::<BigEndian>()? as usize)), //sipush
             //ldc
             0x12 => { //ldc (load constant)
-                let index = frame.code.read_u8().unwrap();
+                let index = frame.code.read_u8()?;
                 let constant = frame.class.constant_pool.get(index as usize).unwrap();
 
                 match constant {
@@ -780,10 +279,7 @@ impl RuntimeThread {
                     Constant::Float(float) => frame.op_stack.push(Operand(OperandType::Float, *float as usize)),
                     Constant::String(str_index) => {
                         if let Constant::Utf8(string) = frame.class.constant_pool.get(*str_index as usize).unwrap() {
-                            let allocated_string = RuntimeThread::create_string(
-                                &mut vm,
-                                string
-                            );
+                            let allocated_string = heap.create_string(string, classloader.get_class("java/lang/String").unwrap());
 
                             frame.op_stack.push(Operand(OperandType::ClassReference, allocated_string as usize));
                         }
@@ -803,14 +299,9 @@ impl RuntimeThread {
             }
             ////iload_<n> ; Load int from local variables
             0x1a..=0x1d => {
-                let local_var = frame.local_vars.get(&((opcode - 0x1a) as u16));
+                let local_var = frame.local_vars.get(&((opcode - 0x1a) as u16)).unwrap();
 
-                if local_var.is_none() {
-                    println!("Class: {}, Method: {}, Index: {}, Opcode loc: {}", frame.class.this_class, frame.method_name, opcode - 0x1a, frame.code.position()-1);
-                    panic!("bruh moment");
-                }
-
-                if let Type::Int(int) = local_var.unwrap() { //<n> = 0..3
+                if let Type::Int(int) = local_var { //<n> = 0..3
                     frame.op_stack.push(Operand(OperandType::Int, *int as usize))
                 } else { panic!("iload_n command did not resolve to an int!") }
             },
@@ -884,7 +375,7 @@ impl RuntimeThread {
                 let index = frame.op_stack.pop().unwrap().1 as isize;
                 let arr_ptr = frame.op_stack.pop().unwrap().1 as *mut u8;
 
-                let (header, body) = unsafe { VirtualMachine::get_array::<usize>(arr_ptr) };
+                let (header, body) = unsafe { Heap::get_array::<usize>(arr_ptr) };
 
                 let header_id = unsafe { (*header).id };
 
@@ -912,7 +403,7 @@ impl RuntimeThread {
                 let index = frame.op_stack.pop().unwrap();
                 let arrayref = frame.op_stack.pop().unwrap();
 
-                let (_, ptr) = VirtualMachine::get_array::<u16>(arrayref.1 as *mut u8);
+                let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
 
                 let val = unsafe { *ptr.offset(index.1 as isize) };
                 frame.op_stack.push(Operand(OperandType::Int, val as usize));
@@ -937,7 +428,7 @@ impl RuntimeThread {
                 let index = frame.op_stack.pop().unwrap();
                 let arrayref = frame.op_stack.pop().unwrap();
 
-                let (_, ptr) = VirtualMachine::get_array::<u16>(arrayref.1 as *mut u8);
+                let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
 
                 unsafe {
                     let offset = ptr.offset(index.1 as isize);
@@ -972,8 +463,8 @@ impl RuntimeThread {
 
             },
             0x84 => { //inc
-                let index = frame.code.read_u8().unwrap();
-                let byte = frame.code.read_u8().unwrap();
+                let index = frame.code.read_u8()?;
+                let byte = frame.code.read_u8()?;
 
                 let var = frame.local_vars.get(&(index as u16)).unwrap();
                 if let Type::Int(int) = var {
@@ -982,7 +473,7 @@ impl RuntimeThread {
                 } else { panic!("Local variable used in iinc was not an int!") }
             },
             0x99..=0x9e => {
-                let offset = frame.code.read_u16::<BigEndian>().unwrap()- 2;
+                let offset = frame.code.read_u16::<BigEndian>()?- 2;
                 let val = frame.op_stack.pop().unwrap().1 as i32;
 
                 if match opcode {
@@ -998,7 +489,7 @@ impl RuntimeThread {
                 }
             }
             0x9f..=0xa4 => {
-                let offset = frame.code.read_u16::<BigEndian>().unwrap() - 3; //Subtract the two bytes read and the opcode
+                let offset = frame.code.read_u16::<BigEndian>()? - 3; //Subtract the two bytes read and the opcode
                 //Subtract two because the offset will be used relative to the opcode, not the last byte.
 
                 let i2 = frame.op_stack.pop().unwrap().1 as u32;
@@ -1018,7 +509,7 @@ impl RuntimeThread {
                 }
             },
             0xa7 => { //Goto
-                let offset = ( frame.code.read_i16::<BigEndian>().unwrap()) as i64;
+                let offset = ( frame.code.read_i16::<BigEndian>()?) as i64;
                 let pos = (frame.code.position() as i64) + offset;
                 frame.code.set_position(( pos as u64 ) - 3);
             },
@@ -1043,14 +534,14 @@ impl RuntimeThread {
             0xb4 => {
                 //TODO: type checking, exceptions
 
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
+                let index = frame.code.read_u16::<BigEndian>()?;
 
                 let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize);
 
-                let class = vm.get_class(&fieldref.class_name);
+                let class = classloader.get_class(&fieldref.class_name);
                 let object_ref = frame.op_stack.pop().unwrap().1;
 
-                let value = vm.get_field::<usize>(object_ref, class.clone(), &fieldref.name);
+                let value = self.heap.borrow().get_field::<usize>(object_ref, class.unwrap(), &fieldref.name);
                 let fd = FieldDescriptor::parse(&fieldref.descriptor);
 
                 let operand = match fd {
@@ -1067,20 +558,20 @@ impl RuntimeThread {
             },
             0xb5 => { //putfield
                 //TODO: type checking, exceptions
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
+                let index = frame.code.read_u16::<BigEndian>()?;
 
                 let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize);
 
-                let class = vm.get_class(&fieldref.class_name);
+                let class = classloader.get_class(&fieldref.class_name);
 
                 let value = frame.op_stack.pop().unwrap();
                 let object_ref = frame.op_stack.pop().unwrap().1;
 
-                vm.put_field(object_ref, class.clone(), &fieldref.name, value.1);
+                self.heap.borrow().put_field(object_ref, class.unwrap(), &fieldref.name, value.1);
             },
             //invokevirtual
             0xb6 => {
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
+                let index = frame.code.read_u16::<BigEndian>()?;
 
                 let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
 
@@ -1107,12 +598,12 @@ impl RuntimeThread {
                 }
 
                 let object_ref = frame.op_stack.pop().unwrap();
-                let object_info = vm.objects.get(object_ref.1).unwrap();
+                let object_info = heap.objects.get(object_ref.1).unwrap();
 
                 if method_ref.info_type != RefInfoType::MethodRef { panic!("Invokevirtual must reference a MethodRef!"); }
                 if method_ref.name == "<init>" || method_ref.name == "<clinit>" { panic!("Invokevirtual must not invoke an initialization method!"); }
 
-                let class = vm.get_class(&method_ref.class_name);
+                let class = classloader.get_class(&method_ref.class_name).unwrap();
                 let method = class.get_method(&method_ref.name, &method_ref.descriptor);
 
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor);
@@ -1156,7 +647,7 @@ impl RuntimeThread {
 
                 if !polymorphic {
 
-                    let (resolved_class, method_to_invoke) = vm.recurse_resolve_overridding_method(
+                    let (resolved_class, method_to_invoke) = classloader.recurse_resolve_overridding_method(
                         object_info.class.clone(),
                         &method.name,
                         &method.descriptor
@@ -1186,7 +677,7 @@ impl RuntimeThread {
             },
             //invokespecial https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-6.html#jvms-6.5.invokespecial
             0xb7 => {
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
+                let index = frame.code.read_u16::<BigEndian>()?;
 
                 let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
 
@@ -1194,17 +685,17 @@ impl RuntimeThread {
 
                 // println!("{}", method_d);
 
-                let method_class = vm.get_class(&method_ref.class_name);
+                let method_class = classloader.get_class(&method_ref.class_name).unwrap();
                 let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor);
                 let to_invoke: (Rc<Class>, Rc<Method>);
 
                 if {
                     (method_class.access_flags & 0x20 == 0x20)
-                    && vm.recurse_is_superclass(frame.class.clone(), &method_class.this_class)
+                    && classloader.recurse_is_superclass(frame.class.clone(), &method_class.this_class)
                     && resolved_method.name != "<init>"
                 } {
-                    to_invoke = vm.recurse_resolve_supermethod_special(
-                       vm.get_class(&frame.class.super_class),
+                    to_invoke = classloader.recurse_resolve_supermethod_special(
+                       classloader.get_class(&frame.class.super_class).unwrap(),
                        &resolved_method.name,
                        &resolved_method.descriptor,
                     ).unwrap();
@@ -1253,11 +744,11 @@ impl RuntimeThread {
                 // }
             },
             0xb8 => { //invokestatic
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
+                let index = frame.code.read_u16::<BigEndian>()?;
 
                 let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
 
-                let (was_just_loaded, class ) = vm.load_and_link_class(method_ref.class_name.as_str()); //Load the class if it isn't already loaded
+                let class = classloader.get_class(method_ref.class_name.as_str()).unwrap(); //Load the class if it isn't already loaded
 
                 let md = MethodDescriptor::parse(method_ref.descriptor.as_str());
                 let method = class.get_method(method_ref.name.as_str(), method_ref.descriptor.as_str());
@@ -1276,7 +767,60 @@ impl RuntimeThread {
                             }
                         });
                     }
-                    let operands_out = vm.invoke_native(&method.name, class.clone(), argument_stack);
+
+                    let name = &*format!("{}|{}", class.this_class, method.name);
+
+                    let operands_out = match name {
+                        "Main|print_int" => {
+                            println!("Main_print_int({})", argument_stack.pop().unwrap().1);
+
+                            Option::None
+                        },
+                        "Main|print_string" => {
+                            let string_reference = argument_stack.pop().unwrap().1;
+
+                            let chars_ptr = heap.get_field::<usize>(string_reference, self.classloader.borrow().get_class("java/lang/String").unwrap(), "chars");
+                            let mut string_bytes: Vec<u8> = Vec::new();
+
+                            unsafe {
+                                let (header, body) = Heap::get_array::<u8>(*chars_ptr as *mut u8);
+                                let length = (*header).size;
+
+                                for i in 0..length {
+                                    let char = *(body.offset(
+                                        // (length as isize - i as isize - 1)
+                                        (i as isize) * size_of::<u8>() as isize
+                                    ));
+                                    string_bytes.push(char);
+                                }
+
+                                let str = String::from_utf8(string_bytes).unwrap();
+                                eprintln!("{}", str);
+
+                                Option::None
+                            }
+                        },
+                        "Main|get_time" => {
+
+                            let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+
+                            let half1 = ((epoch >> 32) & 0xFFFFFFFFF) as u32;
+                            let half2 = (epoch & 0xFFFFFFFFF) as u32;
+
+                            let ops_out: Vec<Operand> = vec![
+                                Operand(OperandType::Long, half1 as usize),
+                                Operand(OperandType::Long, half2 as usize)
+                            ];
+
+                            Option::Some(ops_out)
+                        },
+                        "Main|get_int" => {
+                            Option::Some(vec![
+                                Operand(OperandType::Int, 1)
+                            ])
+                        },
+                        _ => unimplemented!("Unimplemented native method \"{}\"", name)
+                    };
 
                     if operands_out.is_some() {
                         let operands = operands_out.unwrap();
@@ -1284,7 +828,7 @@ impl RuntimeThread {
                             frame.op_stack.push(x.clone());
                         }
                     }
-                } else if was_just_loaded {
+                } else if !*class.static_been_seen.read().unwrap() {
                     let mut new_frame = RuntimeThread::create_frame(
                         class.get_method("<init>", "()V"),
                         class.clone()
@@ -1326,17 +870,22 @@ impl RuntimeThread {
             },
             //new
             0xbb => {
-                let index = frame.code.read_u16::<BigEndian>().unwrap();
-                let classpath = frame.class.constant_pool.resolve_class_info(index as usize);
-                let (loaded, class) = vm.load_and_link_class(classpath);
+                let index = frame.code.read_u16::<BigEndian>()?;
+                let classpath = frame.class.constant_pool.resolve_class_info(index).unwrap();
+                let class = classloader.get_class(classpath).unwrap();
 
                 //TODO: there's probably some type checking and rules that need to be followed here
 
-                let id = vm.create_object(class.clone());
+                let id = heap.create_object(class.clone());
 
                 //Because of how pending_frames adds frames to the stack, you put it in the reverse order, so the top would end up being at the end of the vec.
 
-                if loaded && class.field_map.contains_key("<clinit>") { //Just loaded, we need to run <clinit>
+                if !*class.static_been_seen.read().unwrap() && class.field_map.contains_key("<clinit>") { //Just loaded, we need to run <clinit>
+                    {
+                        let mut seen = class.static_been_seen.write().unwrap();
+                        *seen = true;
+                    }
+
                     pending_frames = Option::Some(vec![
                         RuntimeThread::create_frame(
                             class.get_method("<clinit>", "()V"),
@@ -1348,7 +897,7 @@ impl RuntimeThread {
                 frame.op_stack.push(Operand(OperandType::ClassReference, id));
             },
             0xbc => {
-                let atype = frame.code.read_u8().unwrap();
+                let atype = frame.code.read_u8()?;
 
                 let length = frame.op_stack.pop().unwrap();
 
@@ -1364,7 +913,7 @@ impl RuntimeThread {
                     _ => unreachable!("Array atype must be between 4 & 11!")
                 };
 
-                let ptr = VirtualMachine::allocate_array(iat, length.1);
+                let ptr = Heap::allocate_array(iat, length.1);
                 frame.op_stack.push(Operand(OperandType::ArrayReference, ptr as usize));
             },
             //Breakpoint
@@ -1382,6 +931,8 @@ impl RuntimeThread {
                 self.stack.push(frames.pop().unwrap());
             }
         }
+
+        Result::Ok(())
     }
 
     pub fn debug_op_stack(&self) {
@@ -1393,5 +944,29 @@ impl RuntimeThread {
 
     pub fn get_stack_count(&self) -> usize {
         self.stack.len()
+    }
+
+}
+
+pub mod bytecode {
+    #[allow(non_camel_case_types)]
+    pub enum Instruction {
+        aaload = 0x32,
+        aastore = 0x53,
+        aconst_null = 0x1,
+        aload = 0x19,
+        aload_0 = 0x2a,
+        aload_1 = 0x2b,
+        aload_2 = 0x2c,
+        aload_3 = 0x2d,
+        anewarray = 0xbd,
+        areturn = 0xb0,
+        arraylength = 0xbe,
+        astore = 0x3a,
+        astore_0 = 0x4b,
+        astore_1 = 0x4c,
+        astore_2 = 0x4d,
+        astore_3 = 0x4e,
+        athrow = 0xbf
     }
 }

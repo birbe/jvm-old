@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use std::mem::size_of;
 use crate::vm::vm::{OperandType};
 use std::rc::Rc;
+use std::sync::RwLock;
 
-pub struct Class { //Raw parsed info from the .class file
+pub struct Class { //Parsed info from the .class file
     pub constant_pool: ConstantPool,
     pub access_flags: u16,
     pub this_class: String,
@@ -17,6 +18,8 @@ pub struct Class { //Raw parsed info from the .class file
     pub field_map: HashMap<String, ObjectField>,
     pub method_map: HashMap<String, HashMap<String, Rc<Method>>>,
     pub attribute_map: HashMap<String, Attribute>,
+
+    pub static_been_seen: Rc<RwLock<bool>>,
 
     pub heap_size: usize,
     pub full_heap_size: usize //Heap size of this class plus the superclass
@@ -75,6 +78,10 @@ impl ConstantPool {
         }
     }
 
+    pub fn get_vec(&self) -> &Vec<Constant> {
+        &self.pool
+    }
+
     pub fn get(&self, index: usize) -> Option<&Constant> {
         self.pool.get(index)
     }
@@ -87,57 +94,69 @@ impl ConstantPool {
         self.pool.push(constant)
     }
 
-    pub fn resolve_class_info(&self, index: usize) -> &String {
-        let class_info = self.get(index).unwrap();
+    pub fn resolve_class_info(&self, index: u16) -> Option<&str> {
+        let class_info = self.get(index as usize).unwrap();
         if let Constant::Class(utf8_index) = class_info {
             if let Constant::Utf8(classname) = self.get(*utf8_index as usize).unwrap() {
-                classname
-            } else { panic!("Constant did not resolve to UTF8!"); }
-        } else { panic!("Constant did not resolve to class!"); }
+                return Option::Some(classname);
+            }
+        }
+
+        Option::None
     }
 
-    pub fn resolve_name_and_type(&self, index: usize) -> (&String, &String) {
-        if let Constant::NameAndType(name_index, descriptor_index) = self.pool.get(index).unwrap() {
+    pub fn resolve_utf8(&self, index: u16) -> Option<&str> {
+        if let Constant::Utf8(string) = self.get(index as usize).unwrap() {
+            Option::Some(string)
+        } else {
+            Option::None
+        }
+    }
+
+    pub fn resolve_name_and_type(&self, index: u16) -> Option<(&str, &str)> {
+        if let Constant::NameAndType(name_index, descriptor_index) = self.pool.get(index as usize).unwrap() {
             if let Constant::Utf8(name) = self.pool.get(*name_index as usize).unwrap() {
                 if let Constant::Utf8(descriptor) = self.pool.get(*descriptor_index as usize).unwrap() {
-                    (name, descriptor)
-                } else { panic!("Did not resolve to UTF8 constant!"); }
-            } else { panic!("Did not resolve to UTF8 constant!"); }
-        } else { panic!("Did not resolve to NameAndType constant!"); }
+                    return Option::Some((name, descriptor));
+                }
+            }
+        }
+
+        Option::None
     }
 
     pub fn resolve_ref_info(&self, index: usize) -> RefInfo {
         match self.get(index).unwrap() {
             Constant::MethodRef(class_index, name_and_type_index) => {
-                let class = self.resolve_class_info(*class_index as usize);
-                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+                let class = self.resolve_class_info(*class_index);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index);
 
                 RefInfo {
-                    class_name: class.clone(),
-                    name: name_and_type.0.clone(),
-                    descriptor: name_and_type.1.clone(),
+                    class_name: String::from(class.clone().unwrap()),
+                    name: String::from(name_and_type.unwrap().0.clone()),
+                    descriptor: String::from(name_and_type.unwrap().1.clone()),
                     info_type: RefInfoType::MethodRef
                 }
             },
             Constant::FieldRef(class_index, name_and_type_index) => {
-                let class = self.resolve_class_info(*class_index as usize);
-                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+                let class = self.resolve_class_info(*class_index);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index);
 
                 RefInfo {
-                    class_name: class.clone(),
-                    name: name_and_type.0.clone(),
-                    descriptor: name_and_type.1.clone(),
+                    class_name: String::from(class.clone().unwrap()),
+                    name: String::from(name_and_type.unwrap().0.clone()),
+                    descriptor: String::from(name_and_type.unwrap().1.clone()),
                     info_type: RefInfoType::FieldRef
                 }
             },
             Constant::InterfaceMethodRef(class_index, name_and_type_index) => {
-                let class = self.resolve_class_info(*class_index as usize);
-                let name_and_type = self.resolve_name_and_type(*name_and_type_index as usize);
+                let class = self.resolve_class_info(*class_index);
+                let name_and_type = self.resolve_name_and_type(*name_and_type_index);
 
                 RefInfo {
-                    class_name: class.clone(),
-                    name: name_and_type.0.clone(),
-                    descriptor: name_and_type.1.clone(),
+                    class_name: String::from(class.clone().unwrap()),
+                    name: String::from(name_and_type.unwrap().0),
+                    descriptor: String::from(name_and_type.unwrap().1),
                     info_type: RefInfoType::InterfaceMethodRef
                 }
             },
@@ -343,36 +362,36 @@ impl BaseType {
         }
     }
 
-    pub fn size_of(base: &BaseType) -> usize {
-        match base {
+    pub fn size_of(base: &BaseType, ptr_length: u8, minimum: u8) -> usize {
+        (match base {
             BaseType::Byte => {
-                1
+                minimum
             },
             BaseType::Char => {
-                2
+                if minimum > 2 { minimum } else { 2 }
             },
             BaseType::Double => {
-                8
+                8 / minimum
             },
             BaseType::Float => {
-                4
+                4 / minimum
             },
             BaseType::Int => {
-                4
+                4 / minimum
             },
             BaseType::Long => {
-                8
+                8 / minimum
             },
             BaseType::Reference => {
-                size_of::<usize>()
+                ptr_length
             },
             BaseType::Bool => {
-                1
+                minimum
             },
             BaseType::Short => {
-                2
+                if minimum > 2 { minimum } else { 2 }
             }
-        }
+        }) as usize
     }
 }
 

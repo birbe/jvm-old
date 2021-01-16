@@ -7,6 +7,4 @@ public class String {
     public String(char[] chars) {
         this.chars = chars;
     }
-
-    public static native void print(String s);
 }

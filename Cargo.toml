@@ -1,16 +1,4 @@
-[package]
-name = "jvm-rust"
-version = "0.1.0"
-authors = ["Birb <erik_blair@outlook.com>"]
-edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[[bin]]
-name = "jvm-test"
-path = "jvm-test/src/main.rs"
-test = true
-
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.ht
 [workspace]
 
 members = [

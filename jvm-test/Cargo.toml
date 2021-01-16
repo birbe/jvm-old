@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 
 jvm = { path = "../jvm" }
+wasm = { path = "../wasm" }
