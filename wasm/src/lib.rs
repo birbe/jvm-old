@@ -1,9 +1,6 @@
-use parity_wasm::builder;
-use parity_wasm::builder::{ModuleBuilder, SignatureBuilder, FunctionBuilder, FuncBodyBuilder, signature, FunctionDefinition, ImportBuilder, SignaturesBuilder};
 use jvm;
 use jvm::vm::class::{Class, Method, MethodDescriptor, FieldDescriptor, BaseType, MethodReturnType};
 use std::rc::Rc;
-use parity_wasm::elements::{ValueType, Instruction, Instructions, FuncBody, External, Local};
 use crypto::sha2::Sha256;
 use crypto::digest::Digest;
 use jvm::vm::class::attribute::AttributeItem::Signature;
@@ -15,32 +12,34 @@ use std::collections::HashMap;
 use byteorder::{ReadBytesExt, BigEndian};
 use jvm::vm::vm::VirtualMachine;
 use jvm::vm::linker::loader::ClassLoader;
-use parity_wasm::elements::Error::InvalidSectionId;
-use core::num::flt2dec::Sign;
+use std::cmp::max;
+use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId};
+use walrus::ir::Instr::Binop;
+use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind};
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
 }
 
-fn base_type_as_value_type(bt: &BaseType) -> ValueType {
+fn base_type_as_value_type(bt: &BaseType) -> ValType {
     match bt {
-        BaseType::Byte => ValueType::I32,
-        BaseType::Char => ValueType::I32,
-        BaseType::Double => ValueType::F64,
-        BaseType::Float => ValueType::F32,
-        BaseType::Int => ValueType::I32,
-        BaseType::Long => ValueType::I64,
-        BaseType::Reference => ValueType::I64,
-        BaseType::Bool => ValueType::I32,
-        BaseType::Short => ValueType::I32
+        BaseType::Byte => ValType::I32,
+        BaseType::Char => ValType::I32,
+        BaseType::Double => ValType::F64,
+        BaseType::Float => ValType::F32,
+        BaseType::Int => ValType::I32,
+        BaseType::Long => ValType::I64,
+        BaseType::Reference => ValType::I64,
+        BaseType::Bool => ValType::I32,
+        BaseType::Short => ValType::I32
     }
 }
 
-fn field_descriptor_as_value_type(fd: &FieldDescriptor) -> ValueType {
+fn field_descriptor_as_value_type(fd: &FieldDescriptor) -> ValType {
     match fd {
         FieldDescriptor::BaseType(bt) => base_type_as_value_type(bt),
-        FieldDescriptor::ObjectType(_) => ValueType::I32,
-        FieldDescriptor::ArrayType(_) => ValueType::I32
+        FieldDescriptor::ObjectType(_) => ValType::I32,
+        FieldDescriptor::ArrayType(_) => ValType::I32
     }
 }
 
@@ -119,11 +118,12 @@ pub struct MemoryLayout {
     pub strings: HashMap<String, usize>,
     pub constant_resource_map: HashMap<u16, usize>,
     pub null: u32,
-    pub heap_size_offset: u32
+    pub heap_size_offset: u32,
+    pub memory_id: MemoryId
 }
 
 impl MemoryLayout {
-    pub fn new() -> Self {
+    pub fn new(memory_id: MemoryId) -> Self {
         Self {
             resources: vec![
                 Resource { res_type: ResourceType::Null, offset: 0 },
@@ -133,7 +133,8 @@ impl MemoryLayout {
             strings: HashMap::new(),
             constant_resource_map: HashMap::new(),
             null: 0,
-            heap_size_offset: 1
+            heap_size_offset: 1,
+            memory_id
         }
     }
 
@@ -162,77 +163,112 @@ impl MemoryLayout {
     }
 }
 
-enum QueuedFunction {
-    Normal(FunctionDefinition),
-    Import(SignatureBuilder)
+struct StackHelper<'locals> {
+    vars: HashMap<ValType, Vec<LocalId>>,
+    types: Vec<ValType>,
+    locals: &'locals mut ModuleLocals
+}
+
+impl<'locals> StackHelper<'locals> {
+    pub fn new(module: &'locals mut ModuleLocals) -> Self {
+        Self {
+            vars: HashMap::new(),
+            types: Vec::new(),
+            locals: module
+        }
+    }
+
+    pub fn get(&mut self, t: ValType, offset: usize) -> LocalId {
+        if !self.vars.contains_key(&t) {
+            self.vars.insert(t, Vec::new());
+        }
+
+        let vec = self.vars.get_mut(&t).unwrap();
+
+        if offset+1 > vec.len() {
+            let diff = offset + 1 - vec.len();
+
+            for _ in 0..diff {
+                vec.push(
+                    self.locals.add(t)
+                );
+
+                self.types.push(t)
+            }
+        }
+
+        vec.get(offset).unwrap().clone()
+    }
+}
+
+#[derive(Debug)]
+pub enum MethodFunctionType {
+    Normal(FunctionId),
+    NativeImport(FunctionId, ImportId)
 }
 
 pub struct WasmEmitter<'classloader> {
-    pub module_builder: ModuleBuilder,
+    pub module: Module,
     pub memory: MemoryLayout,
     pub function_count: u32,
-    pub method_function_map: HashMap<String, u32>,
+    pub method_function_map: HashMap<String, MethodFunctionType>,
     pub class_loader: &'classloader ClassLoader,
-    
-    function_queue: Vec<QueuedFunction>,
 
-    pub class_resource_map: HashMap<String, u32> //String being the classpath, and the u32 being a location in the resources
+    pub class_resource_map: HashMap<String, u32>, //String being the classpath, and the u32 being a location in the resources
+    pub main_export: String
 }
 
 impl<'classloader> WasmEmitter<'classloader> {
-    pub fn new(class_loader: &'classloader ClassLoader) -> Self {
+    pub fn new(class_loader: &'classloader ClassLoader, main_export: &str) -> Self {
+        let mut module = Module::with_config(ModuleConfig::new());
+
+        let memory_id = module.memories.add_local(
+            true,
+            4096,
+            Option::None
+        );
+
         let mut emitter = WasmEmitter {
-            module_builder: builder::module(),
-            memory: MemoryLayout::new(),
+            module,
+            memory: MemoryLayout::new(memory_id),
             function_count: 0,
             method_function_map: HashMap::new(),
             class_loader,
-            function_queue: Vec::new(),
-            class_resource_map: HashMap::new()
+            class_resource_map: HashMap::new(),
+            main_export: String::from(main_export)
         };
 
-        emitter.function_queue.push(QueuedFunction::Normal(
-            FunctionBuilder::new().with_signature(
-                SignatureBuilder::new().with_param(ValueType::I32).with_result(ValueType::I32).build_sig()
-            ).with_body(
-                FuncBody::new(vec![], Instructions::new(vec![
-                    Instruction::I32Const(emitter.memory.heap_size_offset as i32),
-                    Instruction::I32Load(0, 0), //Load the heap size
-                    Instruction::GetLocal(0), //Requested allocate size
-                    Instruction::I32Add, //new size
-                    Instruction::SetLocal(1), //store the new size
+        {
+            let requested_size = emitter.module.locals.add(ValType::I32);
 
-                    Instruction::I32Const(emitter.memory.heap_size_offset as i32), //Offset of the heap size
-                    Instruction::GetLocal(1), //Get the new size
-                    Instruction::I32Store(0, 0), //Store it
+            let mut heap_allocate = FunctionBuilder::new(&mut emitter.module.types, &[ValType::I32], &[ValType::I32]);
 
-                    Instruction::GetLocal(1), //Get it again
-                    Instruction::I32Const(emitter.memory.resources.len() as i32), //Start of the heap
-                    Instruction::I32Add, //Add them together
-                    Instruction::Return
-                ]))
-            ).build()
-        ));
+            heap_allocate.name(String::from("allocate_to_heap")).func_body().local_get(requested_size);
 
-        emitter.function_queue.push(QueuedFunction::Normal(
-            FunctionBuilder::new().with_signature(
-                SignatureBuilder::new().with_param(ValueType::I32).with_result(ValueType::I32).build_sig()
-            ).with_body(FuncBody::new(vec![], Instructions::new(vec![
-                Instruction::GetLocal(0), //Get the offset to the class size
-                Instruction::I32Load(0, 0), //Get the size of the class
+            let id = heap_allocate.finish(vec![requested_size], &mut emitter.module.funcs);
 
-                Instruction::I32Const(1),
-                Instruction::I32Add, //Increment the size by one so we can remember which class this is
+            emitter.method_function_map.insert(String::from("allocate_to_heap"), MethodFunctionType::Normal(id));
+        }
 
-                Instruction::Call(0), //Call allocate_heap which returns the offset to the allocated memory
-                Instruction::Return, //Return the offset
-            ]))).build()
-        ));
+        //TODO: make these do stuff again
 
-        emitter.method_function_map.insert(String::from("allocate_heap"), 0);
-        emitter.method_function_map.insert(String::from("allocate_class"), 1);
+        {
+            let class = emitter.module.locals.add(ValType::I32);
+
+            let mut heap_allocate = FunctionBuilder::new(&mut emitter.module.types, &[ValType::I32], &[ValType::I32]);
+
+            heap_allocate.name(String::from("heap_allocate")).func_body().local_get(class);
+
+            let id = heap_allocate.finish(vec![class], &mut emitter.module.funcs);
+
+            emitter.method_function_map.insert(String::from("allocate_class"), MethodFunctionType::Normal(id));
+        }
 
         emitter
+    }
+
+    pub fn build(mut self) -> Vec<u8> {
+        self.module.emit_wasm()
     }
 
     pub fn process_classes(&mut self) {
@@ -240,8 +276,6 @@ impl<'classloader> WasmEmitter<'classloader> {
             let offset = self.memory.append_resource(ResourceType::String(classpath.clone()));
 
             let clazz = class.unwrap();
-
-            println!("Class {} fields length {}", classpath, clazz.full_heap_size);
 
             self.memory.append_resource(ResourceType::Class {
                 classpath_offset: 0,
@@ -264,257 +298,325 @@ impl<'classloader> WasmEmitter<'classloader> {
     pub fn process_method(&mut self, class: &Class, method: &Method) -> Option<()> {
         let method_descriptor = MethodDescriptor::parse(&method.descriptor);
 
-        let params: Vec<ValueType> = method_descriptor.parameters.iter().map(|f| field_descriptor_as_value_type(f)).collect();
-
-        let mut signature_builder = SignatureBuilder::new().with_params(params);
-
-        if let MethodReturnType::FieldDescriptor(fd) = &method_descriptor.return_type {
-            signature_builder = signature_builder.with_result(field_descriptor_as_value_type(fd))
-        }
-
-        let signature = signature_builder.build_sig();
+        let formatted = format_method_name(class, method);
 
         if let AttributeItem::Code(code) = &method.attribute_map.get("Code")?.info {
-            let (instructions, locals) = self.bytecode_to_instructions(code, class);
+            let params_vec: Vec<ValType> = method_descriptor.parameters.iter().map(|p| field_descriptor_as_value_type(p)).collect();
+            let return_vec = match &method_descriptor.return_type {
+                MethodReturnType::Void => vec![],
+                MethodReturnType::FieldDescriptor(f) => vec![field_descriptor_as_value_type(f)]
+            };
 
-            self.function_queue.push(QueuedFunction::Normal(
-                FunctionBuilder::new().with_signature(signature).with_body(
-                    FuncBody::new(
-                        locals.iter().map(|x| Local::new(1, x.clone())).collect(), instructions
-                    )
-                )
-            ))
+            let mut builder = FunctionBuilder::new(
+                &mut self.module.types,
+                &params_vec[..],
+                &return_vec[..]
+            );
 
-            println!("Method {}\nInstructions: {:?}", method.name, instructions);
+            let mut locals = Self::analyze_locals(code, class);
+
+            let mut java_locals = HashMap::new();
+
+            let mut min_local_index = 0;
+            let mut max_local_index = 0;
+
+            for local in locals.iter() {
+                if *local.0 < min_local_index { min_local_index = *local.0; }
+                if *local.0 > max_local_index { max_local_index = *local.0; }
+            }
+
+            let mut i: usize = 0;
+
+            for param in method_descriptor.parameters.iter() {
+                java_locals.insert(i, self.module.locals.add(field_descriptor_as_value_type(param)));
+
+                i += 1;
+            }
+
+            let local_variables_not_params = max(max_local_index, method_descriptor.parameters.len()) - method_descriptor.parameters.len();
+
+            println!("Max index: {}, local vars not params: {}", max_local_index, local_variables_not_params);
+
+            for index in max_local_index-local_variables_not_params..max_local_index {
+                java_locals.insert(index, self.module.locals.add(locals.get(&index).unwrap().clone()));
+            }
+
+            self.bytecode_to_body(&mut builder, code, method, class, java_locals);
+
+            builder.name(
+                formatted
+            );
+
+            let id = builder.finish(
+                method_descriptor.parameters.iter().map(|x| self.module.locals.add(field_descriptor_as_value_type(x))).collect(),
+                &mut self.module.funcs
+            );
+
+            self.method_function_map.insert(format_method_name(class, method), MethodFunctionType::Normal(id));
+
+
         } else {
             //Native method (but we should probably check the flags as well but eh)
 
-            //Native methods are treated as an export function
+            //Native methods are treated as an imported external function
 
-            let params: Vec<ValueType> = method_descriptor.parameters.iter().map(|f| field_descriptor_as_value_type(f)).collect();
-            let mut sig = SignatureBuilder::new().with_params(params);
+            let params_vec: Vec<ValType> = method_descriptor.parameters.iter().map(|x| field_descriptor_as_value_type(x)).collect();
+            let return_vec = match &method_descriptor.return_type {
+                MethodReturnType::Void => vec![],
+                MethodReturnType::FieldDescriptor(fd) => vec![field_descriptor_as_value_type(fd)]
+            };
 
-            match &method_descriptor.return_type {
-                MethodReturnType::Void => {}
-                MethodReturnType::FieldDescriptor(fd) => { sig = sig.with_result(field_descriptor_as_value_type(fd)); }
-            }
+            let native_type = self.module.types.add(
+                &params_vec[..],
+                &return_vec[..]
+            );
 
-            function = function.with_signature(sig.build_sig());
+            let import = self.module.add_import_func(
+                "jvm_native",
+                &formatted,
+                native_type
+            );
 
-            let id = self.function_count;
-
-            self.module_builder.push_function(function.build());
-
-            self.module_builder = self.module_builder.with_import(ImportBuilder::new().with_external(
-                External::Function(id)
-            ).build());
-
-            // function.with_signature(SignatureBuilder::new().with)
+            self.method_function_map.insert(String::from(&formatted), MethodFunctionType::NativeImport(import.0, import.1));
         }
 
         Option::Some(())
     }
 
-    fn bytecode_to_instructions(&mut self, code: &Code, class: &Class) -> (Instructions, Vec<ValueType>) {
+    ///Returns every single local variable that is used and it's type
+    fn analyze_locals(code: &Code, class: &Class) -> HashMap<usize, ValType> {
         let mut bytes = Cursor::new(code.code.clone());
         let len = code.code.len();
 
-        let mut instructions = Vec::new();
-
-        let locals = Vec::new();
-        let mut jvm_locals = Vec::new();
-
-        //I'm calling them jugglers because they're local variables which are used to re-arrange the
-        //stack so that WASM instructions will be able to use what's on the stack in the right order
-
-        let i32_jugglers = 0;
-        let i64_jugglers = 0;
-        let f32_jugglers = 0;
-        let f64_jugglers = 0;
+        let mut jvm_locals = HashMap::new();
 
         while bytes.position() < len as u64 {
             let opcode = bytes.read_u8().unwrap();
 
-            instructions.extend(match opcode {
-                0x1 => vec![ //aconst_null
-                             Instruction::I32Const(self.memory.null as i32)
-                ],
-                0x2..=0x5 => vec![ //iconst_<n-1>
-                    Instruction::I32Const(opcode as i32 - 0x3)
-                ],
-                0x10 => vec![
-                    Instruction::I32Const(bytes.read_u8().unwrap() as i32)
-                ],
-                0x12 => { //ldc
-                    let index = bytes.read_u8().unwrap();
-                    vec![
-                        match class.constant_pool.get(index as usize).unwrap() {
-                            Constant::Integer(int) => Instruction::I32Const(*int),
-                            Constant::Float(float) => Instruction::F32Const(*float as u32),
-                            Constant::Long(long) => Instruction::I64Const(*long),
-                            Constant::Double(double) => Instruction::F64Const(*double as u64),
-                            Constant::String(string) => {
-                                let utf8 = class.constant_pool.resolve_utf8(*string).unwrap();
-
-                                let offset = if !self.memory.strings.contains_key(utf8) {
-                                    self.memory.allocate_string(String::from(utf8), self.class_loader.get_class("java/lang/String").unwrap().as_ref())
-                                } else {
-                                    *self.memory.strings.get(utf8).unwrap()
-                                };
-
-                                Instruction::I32Const(offset as i32)
-                            }
-                            _ => Instruction::Nop
-                        }
-                    ]
-                },
+            match opcode {
                 0x15 => { //iload
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::I32);
-
-                    vec![
-                        Instruction::GetLocal(bytes.read_u8().unwrap() as u32)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I32);
                 },
                 0x16 => { //lload
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::I64);
-
-                    vec![
-                        Instruction::GetLocal(bytes.read_u8().unwrap() as u32)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I64);
                 },
                 0x17 => { //fload
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::F32);
-
-                    vec![
-                        Instruction::GetLocal(bytes.read_u8().unwrap() as u32)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::F32);
                 },
                 0x18 => { //dload
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::F64);
-
-                    vec![
-                          Instruction::GetLocal(bytes.read_u8().unwrap() as u32)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::F64);
                 },
                 0x19 => { //aload
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::I32);
-
-                    vec![
-                        Instruction::GetLocal(bytes.read_u8().unwrap() as u32)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I32);
                 },
                 0x1a..=0x1d => { //iload_<n>
                     let index = (opcode as u32) - 0x1a;
 
-                    jvm_locals.insert(index as usize, ValueType::I32);
-
-                    vec![
-                        Instruction::GetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I32);
                 },
                 0x1e..=0x21 => { //iload_<n>
                     let index = (opcode as u32) - 0x1e;
 
-                    jvm_locals.insert(index as usize, ValueType::I64);
-
-                    vec![
-                        Instruction::GetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I64);
                 },
                 0x22..=0x25 => { //fload_<n>
                     let index = (opcode as u32) - 0x22;
 
-                    jvm_locals.insert(index as usize, ValueType::F32);
-
-                    vec![
-                        Instruction::GetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::F32);
                 },
                 0x26..=0x29 => { //dload_<n>
                     let index = (opcode as u32) - 0x26;
 
-                    jvm_locals.insert(index as usize, ValueType::F64);
-
-                    vec![
-                          Instruction::GetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::F64);
                 },
                 0x2a..=0x2d => { //aload_<n>
                     let index = (opcode as u32) - 0x2a;
 
-                    jvm_locals.insert(index as usize, ValueType::I32);
-
-                    vec![
-                        Instruction::GetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I32);
                 },
-                0x32 => vec![ //aaload
-                    Instruction::I32Add,
-                    Instruction::I32Load(0, 0)
-                ],
-                0x33 => vec![ //baload
-                    Instruction::I32Const(1),
-                    Instruction::I32Add, //Increment by one
-
-                    //Arrayref is now at the top of the stack
-                    Instruction::I32Add,
-                    //The proper offset to the element is now at the top
-                    Instruction::I32Load(0, 0) //Load the byte/bool
-                ],
                 0x3a => { //astore
                     let index = bytes.read_u8().unwrap() as u32;
 
-                    jvm_locals.insert(index as usize, ValueType::I32);
-
-                    vec![
-                        Instruction::SetLocal(index)
-                    ]
+                    jvm_locals.insert(index as usize, ValType::I32);
                 },
-                0x3b..=0x3e => vec![ //istore_<n>
-                    Instruction::SetLocal(opcode as u32 - 0x3b)
-                ],
-                0x4b..=0x4e => vec![
-                    Instruction::SetLocal(opcode as u32 - 0x4b)
-                ],
-                0x53 => vec![ //aastore
-                    Instruction::SetLocal(0),
-                    Instruction::I32Add,
-                    Instruction::GetLocal(0),
-                    Instruction::I32Store(0, 0)
-                ],
-                0x54 => vec![ //bastore
-                              Instruction::SetLocal(0), //Stash the value
-                              Instruction::SetLocal(1), //Stash the index
+                0x3b..=0x3e => { //istore_<n>
+                    jvm_locals.insert(opcode as usize - 0x3b, ValType::I32);
+                }
+                0x4b..=0x4e => { //astore_<n>
+                    jvm_locals.insert(opcode as usize - 0x4b, ValType::I32);
+                },
+                _ => {}
+            }
+        }
 
-                              //arrayref is on top
+        jvm_locals
+    }
 
-                              //TODO: null check
+    fn bytecode_to_body(&mut self, builder: &mut FunctionBuilder, code: &Code, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Option<()> {
+        let mut bytes = Cursor::new(code.code.clone());
+        let len = code.code.len();
 
-                              Instruction::I32Const(1), //Increment by one because the length is first
-                              Instruction::I32Add, //index + 1
-                              Instruction::I32Add, //(index + 1) + arrayref
+        let mut locals_max = 0; //The max index used to the local map in the bytecode
 
-                              Instruction::GetLocal(0), //Unshelve the value
-                              Instruction::I32Store(0, 0)
-                ],
-                0xac => vec![ //ireturn
-                              Instruction::Return
-                ],
-                0xb0 => vec![ //areturn
-                              Instruction::Return
-                ],
+        let mut helper = StackHelper::new(&mut self.module.locals);
+
+        java_locals.iter().for_each(|i| {
+            if *i.0 > locals_max { locals_max = *i.0; }
+        });
+        
+        let mut body = builder.func_body();
+
+        while bytes.position() < len as u64 {
+            let opcode = bytes.read_u8().unwrap();
+
+            match opcode {
+                0x1 => { //aconst_null
+                    body.i32_const(self.memory.null as i32);
+                },
+                0x2..=0x5 => { //iconst_<n-1>
+                    body.i32_const(opcode as i32 - 0x3);
+                },
+                0x10 => {
+                    body.i32_const(bytes.read_u8().unwrap() as i32);
+                },
+                0x12 => { //ldc
+                    let index = bytes.read_u8().unwrap();
+                    
+                    match class.constant_pool.get(index as usize).unwrap() {
+                        Constant::Integer(int) => { body.i32_const(*int); },
+                        Constant::Float(float) => { body.f32_const(*float); },
+                        Constant::Long(long) => { body.i64_const(*long); },
+                        Constant::Double(double) => { body.f64_const(*double as f64); },
+                        Constant::String(string) => {
+                            let utf8 = class.constant_pool.resolve_utf8(*string).unwrap();
+
+                            let offset = if !self.memory.strings.contains_key(utf8) {
+                                self.memory.allocate_string(String::from(utf8), self.class_loader.get_class("java/lang/String").unwrap().as_ref())
+                            } else {
+                                *self.memory.strings.get(utf8).unwrap()
+                            };
+
+                            body.i32_const(offset as i32);
+                        }
+                        _ => {}
+                    };
+                },
+                0x15..=0x19 => { //iload, lload, fload, dload, aload
+                    body.local_get(java_locals.get((&(bytes.read_u8().unwrap() as usize)))?.clone());
+                },
+                0x1a..=0x1d => { //iload_<n>
+                    body.local_get(java_locals.get(&(opcode as usize - 0x1))?.clone());
+                },
+                0x1e..=0x21 => { //lload_<n>
+                    body.local_get(java_locals.get(&(opcode as usize - 0x1e))?.clone());
+                },
+                0x22..=0x25 => { //fload_<n>
+                    body.local_get(java_locals.get(&(opcode as usize - 0x22))?.clone());
+                },
+                0x26..=0x29 => { //dload_<n>
+                    body.local_get(java_locals.get(&(opcode as usize - 0x26))?.clone());
+                },
+                0x2a..=0x2d => { //aload_<n>
+                    body.local_get(java_locals.get(&(opcode as usize - 0x2a))?.clone());
+                },
+                0x32 => { //aaload
+                    body.binop(BinaryOp::I32Add);
+                    body.store(
+                        self.memory.memory_id,
+                        StoreKind::I32 {
+                            atomic: true
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    );
+                },
+                0x33 => { //baload
+                    body.i32_const(1);
+                    body.binop(BinaryOp::I32Add);
+
+                    body.binop(BinaryOp::I32Add); //Increment by one
+
+                    //Arrayref is now at the top of the stack
+                    body.binop(BinaryOp::I32Add);
+                    //The proper offset to the element is now at the top
+                    body.store(
+                        self.memory.memory_id,
+                        StoreKind::I32 {
+                            atomic: true
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    ); //Load the byte/bool
+                },
+                0x3a => { //astore
+                    body.local_set(java_locals.get(&(bytes.read_u8().unwrap() as usize))?.clone());
+                },
+                0x3b..=0x3e => { //istore_<n>
+                    body.local_set(java_locals.get(&(opcode as usize - 0x3b))?.clone());
+                },
+                0x4b..=0x4e => { //astore_<n>
+                    body.local_set(java_locals.get(&(opcode as usize - 0x4b))?.clone());
+                },
+                0x53 => { //aastore
+                    body.local_set(helper.get(ValType::I32, 0));
+                    body.binop(BinaryOp::I32Add);
+                    body.local_get(helper.get(ValType::I32, 0));
+                    body.store(
+                        self.memory.memory_id,
+                        StoreKind::I32 {
+                            atomic: true
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    );
+                },
+                0x54 => { //bastore
+                    body.local_set(helper.get(ValType::I32, 0));
+
+                    //arrayref is on top
+
+                    //TODO: null check
+
+                    body.i32_const(1); //Increment by one because the length is first
+                    body.binop(BinaryOp::I32Add); //index + 1
+                    body.binop(BinaryOp::I32Add); //(index + 1) + arrayref
+
+                    body.local_get(helper.get(ValType::I32, 0)); //Un-stash the value
+                    body.store(
+                        self.memory.memory_id,
+                        StoreKind::I32 {
+                            atomic: true
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    );
+                },
+                0xac => {
+                    body.return_();
+                }
+                0xb0 => {
+                    body.return_();
+                },
                 0xb1 => { //return (void)
-                    vec![]
+                    body.return_();
                 },
                 0xb5 => { //putfield
                     let index = bytes.read_u16::<BigEndian>().unwrap();
@@ -526,67 +628,57 @@ impl<'classloader> WasmEmitter<'classloader> {
                         let field_offset = class.field_map.get(name).unwrap().offset;
                         let fd = FieldDescriptor::parse(descriptor);
 
-                        vec![
-                            Instruction::SetLocal(0), //Stash the value
+                        body.local_set(
+                            helper.get(ValType::I32, 0)
+                        ); //stash
 
-                            Instruction::I32Const(field_offset as i32),
-                            Instruction::I32Const(1),
+                        body.i32_const(field_offset as i32);
+                        body.i32_const(1);
 
-                            Instruction::I32Add,
-                            Instruction::I32Add, //pointer + 1 + field offset
+                        body.binop(BinaryOp::I32Add);
+                        body.binop(BinaryOp::I32Add);
 
-                            Instruction::GetLocal(0), //Get the value
-                            { //What kind of value we're storing
-                                match fd {
-                                    FieldDescriptor::BaseType(bt) => {
-                                        match bt {
-                                            BaseType::Byte => Instruction::I32Store(0, 0),
-                                            BaseType::Char => Instruction::I32Store(0, 0),
-                                            BaseType::Double => Instruction::F64Store(0, 0),
-                                            BaseType::Float => Instruction::F32Store(0, 0),
-                                            BaseType::Int => Instruction::I32Store(0, 0),
-                                            BaseType::Long => Instruction::I64Store(0, 0),
-                                            BaseType::Reference => Instruction::I32Store(0, 0),
-                                            BaseType::Bool => Instruction::I32Store(0, 0),
-                                            BaseType::Short => Instruction::I32Store(0, 0)
-                                        }
-                                    }
-                                    FieldDescriptor::ObjectType(_) => Instruction::I32Store(0, 0),
-                                    FieldDescriptor::ArrayType(_) => Instruction::I32Store(0, 0)
-                                }
-                            }
-                        ]
+                        body.local_get(
+                            helper.get(ValType::I32, 0)
+                        );
                     } else { panic!("Constant did not resolve to FieldRef!"); }
                 },
                 0xb7 => { //TODO: invokespecial
                     let index = bytes.read_u16::<BigEndian>().unwrap();
 
-                    vec![
-                        Instruction::Nop
-                    ]
+                    //nop
                 },
                 0xb8 => { //TODO: invokestatic
                     let index = bytes.read_u16::<BigEndian>().unwrap();
 
-                    vec![
-                        Instruction::Nop
-                    ]
+                    //nop
                 },
-                0xbd => vec![ //anewarray
-                    Instruction::I32Const(1), //Size of the array
-                    Instruction::I32Add,
-                    Instruction::Call(0)
-                ],
-                0xbe => vec![ //arraylength
-                    Instruction::I32Load(0, 0)
-                ],
+                0xbd => { //anewarray
+                    body.i32_const(1); //Size of the array takes up an I32
+                    body.binop(BinaryOp::I32Add);
+                    body.call(
+                        match self.method_function_map.get("allocate_to_heap").unwrap() {
+                            MethodFunctionType::Normal(funcid) => funcid.clone(),
+                            MethodFunctionType::NativeImport(_, _) => unreachable!()
+                        }
+                    );
+                },
+                0xbe => { //arraylength
+                    body.load(
+                        self.memory.memory_id,
+                        LoadKind::I32 {
+                            atomic: true
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    ); //the pointer to the array will be the length itself
+                },
                 _ => unimplemented!("Unimplemented opcode {}", opcode)
-                // _ => vec![
-                //     Instruction::Nop
-                // ]
-            });
+            }
         }
 
-        (Instructions::new(instructions), locals)
+        Option::Some(())
     }
 }

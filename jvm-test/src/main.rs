@@ -25,9 +25,15 @@ fn main() {
 
         println!("Creating WASM");
 
-        let mut wasm = WasmEmitter::new(&cl);
+        let mut wasm = WasmEmitter::new(&cl, "Main!main!([Ljava/lang/String;)V");
 
         wasm.process_classes();
+
+        println!("Method function map:\n\n{:?}", wasm.method_function_map);
+
+        let bytes = wasm.build();
+
+        fs::write("./out.wasm", bytes);
     } else {
         run_vm(normalized);
     }
