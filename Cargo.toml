@@ -2,7 +2,7 @@
 [workspace]
 
 members = [
-    "jvm-test",
+    "jvm_test",
     "wasm",
     "jvm"
 ]

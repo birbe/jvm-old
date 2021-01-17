@@ -1,2 +1,4 @@
 /target
 /.idea
+/jvm_test/java/**/*.class
+/jvm_test/wasm_out/*

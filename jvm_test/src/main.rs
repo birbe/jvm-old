@@ -12,14 +12,14 @@ use jvm::vm::linker::loader::ClassLoader;
 fn main() {
     let dir = current_dir().unwrap();
 
-    let normalized = fs::canonicalize(
-        dir.join("jvm-test").join("java")
+    let javaroot = fs::canonicalize(
+        dir.join("jvm_test").join("java")
     ).unwrap();
 
     let interpret_or_jit = false;
 
     if !interpret_or_jit {
-        let mut cl = ClassLoader::new(normalized);
+        let mut cl = ClassLoader::new(javaroot);
 
         let (_, class) = cl.load_and_link_class("Main").ok().unwrap();
 
@@ -33,9 +33,9 @@ fn main() {
 
         let bytes = wasm.build();
 
-        fs::write("./out.wasm", bytes);
+        fs::write("./jvm_test/wasm_out/out.wasm", bytes);
     } else {
-        run_vm(normalized);
+        run_vm(javaroot);
     }
 }
 
