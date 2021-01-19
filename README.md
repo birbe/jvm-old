@@ -7,8 +7,8 @@ in order to run Java applets/applications.
 
 There are currently two modes of execution, but they are both highly incomplete.
 
-- Interpreted mode (some bytecodes implemented, not in active development)
-- Bytecode -> WASM compilation (in active development)
+- Interpreted mode
+- Bytecode -> WASM compilation
 
 ## Roadmap
 
