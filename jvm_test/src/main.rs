@@ -8,6 +8,10 @@ use jvm::vm::vm::VirtualMachine;
 use std::path::PathBuf;
 use wasm::WasmEmitter;
 use jvm::vm::linker::loader::ClassLoader;
+use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits};
+use wasmtime::Extern::Memory;
+use std::io::Write;
+use clap::{App, Arg};
 
 fn main() {
     let dir = current_dir().unwrap();
@@ -16,7 +20,26 @@ fn main() {
         dir.join("jvm_test").join("java")
     ).unwrap();
 
-    let interpret_or_jit = false;
+    let app = App::new("Rust JVM Test")
+        .version("0.1")
+        .about("Tests the JVM in either WASM-compilation mode or interpreted mode")
+        .arg(Arg::with_name("mode")
+            .long("mode")
+            .short("m")
+            .help("Modes: `wasm` or `i` (interpreted)")
+            .takes_value(true)
+            .required(true))
+        .get_matches();
+
+    let mode = app.value_of("mode").unwrap();
+
+    let interpret_or_jit = if mode == "i" {
+        true
+    } else if mode == "wasm" {
+        false
+    } else {
+        panic!("Unknown execution method. Must be `wasm` or `i` (interpreted)");
+    };
 
     if !interpret_or_jit {
         let mut cl = ClassLoader::new(javaroot);
@@ -29,11 +52,39 @@ fn main() {
 
         wasm.process_classes();
 
-        println!("Method function map:\n\n{:?}", wasm.method_function_map);
+        let (wasm, memory) = wasm.build();
 
-        let bytes = wasm.build();
+        println!("{}", String::from_utf8(memory.data.clone()).unwrap());
 
-        fs::write("./jvm_test/wasm_out/out.wasm", bytes);
+        fs::write("./jvm_test/wasm_out/out.wasm", &wasm);
+
+        {
+            let store = Store::default();
+
+            let module = Module::from_binary(store.engine(), &wasm[..]).unwrap();
+
+            let print_int = Func::wrap(&store, |x: i32| {
+                println!("{}", x);
+            });
+
+            let print_string = Func::wrap(&store, |x: i32| {
+                println!("String location: {}", x);
+            });
+
+            let imports = [print_int.into(), print_string.into()];
+
+            let instance = Instance::new(&store, &module, &imports).unwrap();
+
+            let heap = instance.get_export("heap").unwrap().into_memory().unwrap();
+
+            unsafe {
+                heap.data_unchecked_mut().write(&memory.data[..]);
+            }
+
+            instance.get_export("main").unwrap().into_func().unwrap().call(
+                &[Val::I32(100)]
+            );
+        }
     } else {
         run_vm(javaroot);
     }
@@ -50,7 +101,7 @@ fn run_vm(path: PathBuf) {
         vm.start_time = SystemTime::now();
 
         let thread = vm.spawn_thread(String::from("Main"), "main", "([Ljava/lang/String;)V", main.clone(), vec![
-            //JVM arguments go here
+            String::from("Hello world!")
         ]);
 
         let mut mut_thread = vm.threads.get_mut("Main").unwrap();

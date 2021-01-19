@@ -1,13 +1,14 @@
 use crate::vm::class::attribute::{Attribute};
 use crate::vm::class::constant::Constant;
 
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 use byteorder::{ReadBytesExt, BigEndian};
 use std::collections::HashMap;
 use std::mem::size_of;
 use crate::vm::vm::{OperandType};
 use std::rc::Rc;
 use std::sync::RwLock;
+use std::io;
 
 pub struct Class { //Parsed info from the .class file
     pub constant_pool: ConstantPool,
@@ -46,6 +47,10 @@ impl Class {
             false
         }
     }
+}
+
+pub trait Deserialize<T> {
+    fn from_bytes<R: Read + Seek>(reader: &mut R, constant_pool: &ConstantPool) -> Option<T>;
 }
 
 pub struct ObjectField {
@@ -125,8 +130,8 @@ impl ConstantPool {
         Option::None
     }
 
-    pub fn resolve_ref_info(&self, index: usize) -> RefInfo {
-        match self.get(index).unwrap() {
+    pub fn resolve_ref_info(&self, index: usize) -> Option<RefInfo> {
+        Option::Some(match self.get(index).unwrap() {
             Constant::MethodRef(class_index, name_and_type_index) => {
                 let class = self.resolve_class_info(*class_index);
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index);
@@ -160,8 +165,8 @@ impl ConstantPool {
                     info_type: RefInfoType::InterfaceMethodRef
                 }
             },
-            _ => panic!("Constant did not resolve to a Methodref, fieldref, or InterfaceMethodRef!")
-        }
+            _ => return Option::None
+        })
     }
 }
 
@@ -362,34 +367,34 @@ impl BaseType {
         }
     }
 
-    pub fn size_of(base: &BaseType, ptr_length: u8, minimum: u8) -> usize {
+    pub fn size_of(base: &BaseType, ptr_length: u8) -> usize {
         (match base {
             BaseType::Byte => {
-                minimum
+                1
             },
             BaseType::Char => {
-                if minimum > 2 { minimum } else { 2 }
+                2
             },
             BaseType::Double => {
-                8 / minimum
+                8
             },
             BaseType::Float => {
-                4 / minimum
+                4
             },
             BaseType::Int => {
-                4 / minimum
+                4
             },
             BaseType::Long => {
-                8 / minimum
+                8
             },
             BaseType::Reference => {
                 ptr_length
             },
             BaseType::Bool => {
-                minimum
+                1
             },
             BaseType::Short => {
-                if minimum > 2 { minimum } else { 2 }
+                2
             }
         }) as usize
     }
@@ -401,13 +406,13 @@ pub struct ArrayType {
     pub dimensions: u8
 }
 
-impl Method {
-    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
+impl Deserialize<Method> for Method {
+    fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Option<Self> {
         let attr_count: u16;
         let n_index;
         let d_index;
 
-        Self {
+        Option::Some(Self {
             access_flags: rdr.read_u16::<BigEndian>().unwrap(),
             name_index: {
                 n_index = rdr.read_u16::<BigEndian>().unwrap();
@@ -435,13 +440,13 @@ impl Method {
                 let mut attr_map: HashMap<String, Attribute> = HashMap::new();
 
                 for _ in 0..attr_count {
-                    let attr = Attribute::from_bytes(rdr, &constant_pool);
+                    let attr = Attribute::from_bytes(rdr, &constant_pool)?;
                     attr_map.insert(String::from(&attr.attribute_name), attr);
                 }
 
                 attr_map
             }
-        }
+        })
     }
 }
 
@@ -452,9 +457,9 @@ pub struct FieldInfo {
     pub attribute_map: HashMap<String, Attribute>
 }
 
-impl FieldInfo {
-    pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
-        FieldInfo {
+impl Deserialize<FieldInfo> for FieldInfo {
+    fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Option<Self> {
+        Option::Some(FieldInfo {
             access_flags: rdr.read_u16::<BigEndian>().unwrap(),
             name: match constant_pool.get(rdr.read_u16::<BigEndian>().unwrap() as usize).unwrap() {
                 Constant::Utf8(str) => str.clone(),
@@ -468,13 +473,13 @@ impl FieldInfo {
                 let mut attr_map: HashMap<String, Attribute> = HashMap::new();
                 let count = rdr.read_u16::<BigEndian>().unwrap();
                 for _ in 0..count {
-                    let attr = Attribute::from_bytes(rdr, constant_pool);
+                    let attr = Attribute::from_bytes(rdr, constant_pool)?;
                     attr_map.insert(String::from(&attr.attribute_name), attr);
                 }
 
                 attr_map
             }
-        }
+        })
     }
 }
 
@@ -483,10 +488,10 @@ impl FieldInfo {
 //for the JVM, ironically, because Annotations are actually a form of attribute at compile-time.
 pub mod attribute {
     use crate::vm::class::attribute::stackmap::StackMapFrame;
-    use std::io::{Cursor};
+    use std::io::{Cursor, Read, Seek, SeekFrom};
     use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::constant::{Constant};
-    use crate::vm::class::ConstantPool;
+    use crate::vm::class::{ConstantPool, Deserialize};
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     pub struct Attribute {
@@ -494,9 +499,9 @@ pub mod attribute {
         pub info: AttributeItem
     }
 
-    impl Attribute {
-        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>, constant_pool: &ConstantPool) -> Self {
-            let start_pos = rdr.position();
+    impl Deserialize<Attribute> for Attribute {
+        fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Option<Self> {
+            let start_pos = rdr.stream_position().unwrap();
 
             let attribute_name_index = rdr.read_u16::<BigEndian>().unwrap();
             let length = rdr.read_u32::<BigEndian>().unwrap();
@@ -561,25 +566,25 @@ pub mod attribute {
                             attributes: {
                                 let mut vec: Vec<Attribute> = Vec::new();
                                 for _ in 0..attr_count {
-                                    vec.push(Attribute::from_bytes(rdr, constant_pool));
+                                    vec.push(Attribute::from_bytes(rdr, constant_pool)?);
                                 }
                                 vec
                             }
                         }
                     }),
                     _ => {
-                        rdr.set_position(rdr.position() + (length as u64));
+                        rdr.seek(SeekFrom::Current(length as i64));
                         AttributeItem::Unimplemented
                     }
                 }
             };
 
-            if rdr.position() > max_pos {
-                println!("Start @ {}, length is {}, end is {}, current pos is {}", start_pos, length, max_pos, rdr.position());
-                panic!("Read too far out of attribute! Lost track of offset");
-            }
+            // if rdr.stream_position() > max_pos {
+            //     println!("Start @ {}, length is {}, end is {}, current pos is {}", start_pos, length, max_pos, rdr.position());
+            //     panic!("Read too far out of attribute! Lost track of offset");
+            // }
 
-            attr_out
+            Option::Some(attr_out)
         }
     }
 
@@ -747,8 +752,9 @@ pub mod attribute {
 }
 
 pub mod constant {
-    use std::io::{Cursor};
+    use std::io::{Cursor, Read, Seek};
     use byteorder::{ReadBytesExt, BigEndian};
+    use crate::vm::class::{Deserialize, ConstantPool};
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4
     #[repr(u8)]
@@ -848,12 +854,12 @@ pub mod constant {
         InvokeDynamic(u16, u16)
     }
 
-    impl Constant {
-        pub fn from_bytes(rdr: &mut Cursor<Vec<u8>>) -> Constant {
+    impl Deserialize<Constant> for Constant {
+        fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Option<Constant> {
             let tag = rdr.read_u8().unwrap();
             let as_pool_tag: PoolTag = tag.into();
 
-            match as_pool_tag {
+            Option::Some(match as_pool_tag {
                 PoolTag::Utf8 => {
                     let length = rdr.read_u16::<BigEndian>().unwrap();
                     let mut buf = Vec::new();
@@ -877,7 +883,7 @@ pub mod constant {
                 PoolTag::MethodHandle => Constant::MethodHandle(rdr.read_u8().unwrap(), rdr.read_u16::<BigEndian>().unwrap()),
                 PoolTag::MethodType => Constant::MethodType(rdr.read_u16::<BigEndian>().unwrap()),
                 PoolTag::InvokeDynamic => Constant::InvokeDynamic(rdr.read_u16::<BigEndian>().unwrap(), rdr.read_u16::<BigEndian>().unwrap())
-            }
+            })
         }
     }
 }

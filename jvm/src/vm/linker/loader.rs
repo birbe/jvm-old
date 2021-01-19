@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::vm::class::constant::{Constant};
-use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool, MethodDescriptor, ArrayType, MethodReturnType};
+use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool, MethodDescriptor, ArrayType, MethodReturnType, Deserialize};
 use crate::vm::class::attribute::{Attribute};
 use std::collections::HashMap;
 use crate::vm::class::FieldDescriptor;
@@ -9,15 +9,16 @@ use std::mem::size_of;
 use std::rc::Rc;
 use std::path::PathBuf;
 use std::iter::FromIterator;
-use std::ops::Deref;
-use std::fs;
+use std::ops::{Deref};
+use std::{fs, io};
 use crate::vm::vm::OperandType::ClassReference;
 use std::sync::RwLock;
 
 pub enum ClassLoadState {
     Unloaded,
     Loading,
-    Loaded(Rc<Class>)
+    Loaded(Rc<Class>),
+    DeserializationError(DeserializationError)
 }
 
 impl ClassLoadState {
@@ -26,10 +27,17 @@ impl ClassLoadState {
         match self {
             ClassLoadState::Unloaded => panic!("Cannot unwrap an unloaded class."),
             ClassLoadState::Loading => panic!("Cannot unwrap a class that is being loaded."),
-            ClassLoadState::Loaded(class) => class.clone()
+            ClassLoadState::Loaded(class) => class.clone(),
+            ClassLoadState::DeserializationError(_) => panic!("Cannot unwrap a class that failed to load.")
         }
     }
 
+}
+
+impl From<DeserializationError> for ClassLoadState {
+    fn from(e: DeserializationError) -> Self {
+        Self::DeserializationError(e)
+    }
 }
 
 pub struct ClassLoader {
@@ -83,7 +91,8 @@ impl ClassLoader {
             match maybe.unwrap() {
                 ClassLoadState::Unloaded => {}
                 ClassLoadState::Loading => return Result::Err(ClassLoadState::Loading),
-                ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap()))
+                ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap())),
+                ClassLoadState::DeserializationError(e) => return Result::Err(ClassLoadState::DeserializationError(e.clone()))
             }
         }
 
@@ -102,7 +111,7 @@ impl ClassLoader {
         // self.loaded_classes.insert(String::from(classpath), true);
         self.class_map.insert(String::from(classpath), ClassLoadState::Loading);
 
-        let mut class = load_class(bytes, 4, 4);
+        let mut class = load_class(bytes, 4)?;
 
         if !self.is_class_linked(&class.super_class) {
             if class.super_class != "" {
@@ -176,7 +185,7 @@ impl ClassLoader {
         ))
     }
 
-    pub fn recurse_is_superclass(&self, subclass: Rc<Class>, superclass_cpath: &str) -> bool {
+    pub fn recurse_is_superclass(&self, subclass: &Class, superclass_cpath: &str) -> bool {
         if subclass.this_class == superclass_cpath {
             false
         } else if superclass_cpath == "java/lang/Object" && subclass.this_class != "java/lang/Object" {
@@ -188,7 +197,7 @@ impl ClassLoader {
         } else {
             let superclass = self.get_class(&subclass.super_class).unwrap();
             self.recurse_is_superclass(
-                superclass,
+                superclass.as_ref(),
                 superclass_cpath
             )
         }
@@ -260,99 +269,122 @@ pub fn are_classpaths_siblings(a: &str, b: &str) -> bool {
     }
 }
 
-pub fn load_class(bytes: Vec<u8>, ptr_len: u8, minimum: u8) -> Class {
+pub enum DeserializationError {
+    InvalidConstant(String),
+    ClassFormatError,
+    MajorTooHigh(u16),
+    EOF,
+    InvalidPayload
+}
+
+impl Clone for DeserializationError {
+    fn clone(&self) -> Self {
+        match self {
+            DeserializationError::InvalidConstant(s) => Self::InvalidConstant(s.clone()),
+            DeserializationError::ClassFormatError => Self::ClassFormatError,
+            DeserializationError::MajorTooHigh(m) => Self::MajorTooHigh(*m),
+            DeserializationError::EOF => Self::EOF,
+            DeserializationError::InvalidPayload => Self::InvalidPayload
+        }
+    }
+}
+
+impl From<io::Error> for DeserializationError {
+    fn from(_: io::Error) -> Self {
+        Self::EOF
+    }
+}
+
+pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationError> {
     let mut rdr = Cursor::new(bytes);
 
-    let magic = rdr.read_u32::<BigEndian>().unwrap();
+    let magic = rdr.read_u32::<BigEndian>()?;
 
     if magic != 0xCAFEBABE {
-        panic!("ClassFormatError");
+        return Result::Err(DeserializationError::ClassFormatError);
     }
 
-    let major = rdr.read_u16::<BigEndian>().unwrap();
-    let _minor = rdr.read_u16::<BigEndian>().unwrap();
+    let major = rdr.read_u16::<BigEndian>()?;
+    let _minor = rdr.read_u16::<BigEndian>()?;
 
     if major > 51 {
-        panic!("Major version too high for this JVM implementation. Aborting");
+        // Major version too high for this JVM implementation
+        return Result::Err(DeserializationError::MajorTooHigh(51));
     }
 
-    let constant_pool_count = rdr.read_u16::<BigEndian>().unwrap(); //The constant pool count is equal to the number of constants + 1
+    let constant_pool_count = rdr.read_u16::<BigEndian>()?; //The constant pool count is equal to the number of constants + 1
 
     let mut constant_pool: ConstantPool = ConstantPool::new();
 
-    constant_pool.push(Constant::Utf8(String::from(""))); //To get the index to +1
+    constant_pool.push(Constant::Utf8(String::from(""))); //To get the index to 1
 
     for _ in 1..constant_pool_count {
-        let constant = Constant::from_bytes(&mut rdr);
+        let constant = Constant::from_bytes(&mut rdr, &constant_pool).ok_or(
+            DeserializationError::InvalidConstant(String::from("Couldn't deserialize constant from constant pool"))
+        )?;
 
         constant_pool.push(constant);
     }
 
-    let access_flags = rdr.read_u16::<BigEndian>().unwrap();
+    let access_flags = rdr.read_u16::<BigEndian>()?;
 
-    let this_class_index = rdr.read_u16::<BigEndian>().unwrap();
+    let this_class_index = rdr.read_u16::<BigEndian>()?;
     let this_class: String;
 
-    let super_class_index = rdr.read_u16::<BigEndian>().unwrap();
+    let super_class_index = rdr.read_u16::<BigEndian>()?;
 
     let super_class: String;
 
-    if let Constant::Class(const_index) = constant_pool.get(this_class_index as usize).unwrap() {
-        if let Constant::Utf8(string) = constant_pool.get(*const_index as usize).unwrap() {
-            this_class = String::from(string);
-        } else {
-            unreachable!("?? what??? the fuck");
-        }
-    } else {
-        panic!("This-class must be a ClassInfo constant!");
-    }
+    this_class = String::from(constant_pool.resolve_class_info(this_class_index).ok_or(
+        DeserializationError::InvalidConstant(String::from("this_class constant was not a UTF8!"))
+    )?);
 
-    if let Constant::Class(const_index) = constant_pool.get(super_class_index as usize).unwrap() {
-        if let Constant::Utf8(string) = constant_pool.get(*const_index as usize).unwrap() {
-            super_class = String::from(string);
-        } else {
-            unreachable!("?? what??? the fuck");
+    match constant_pool.resolve_class_info(super_class_index) {
+        Some(name) => {
+            super_class = String::from(name);
         }
-    } else {
-        if this_class != "java/lang/Object" {
-            panic!(format!("Superclass must be a ClassInfo constant! {:?}", constant_pool.get(super_class_index as usize).unwrap()));
-        } else {
-            super_class = String::from(""); // java/lang/Object does not have a superclass.
+        None => {
+            if this_class != "java/lang/Object" {
+                return Result::Err(
+                    DeserializationError::InvalidConstant(
+                        format!("Superclass must be a ClassInfo constant! {:?}", constant_pool.get(super_class_index as usize).unwrap())
+                    )
+                );
+            } else {
+                super_class = String::from(""); // java/lang/Object does not have a superclass.
+            }
         }
     }
 
-
-    let interfaces_count = rdr.read_u16::<BigEndian>().unwrap();
+    let interfaces_count = rdr.read_u16::<BigEndian>()?;
 
     let interfaces: Vec<u16> = (0..interfaces_count)
         .map(|_| rdr.read_u16::<BigEndian>().unwrap())
         .collect();
 
-    let field_count = rdr.read_u16::<BigEndian>().unwrap();
+    let field_count = rdr.read_u16::<BigEndian>()?;
 
     let mut field_map: HashMap<String, ObjectField> = HashMap::new();
 
     let mut old_offset = 0;
     let mut new_offset = 0;
 
-    if this_class == "java/lang/String" && field_count == 0 {
-        panic!("java/lang/String had no fields");
-    }
-
     let mut heap_size: usize = 0;
 
     for _ in 0..field_count {
-        let field = FieldInfo::from_bytes(&mut rdr, &constant_pool);
+        let field = FieldInfo::from_bytes(&mut rdr, &constant_pool).ok_or(
+            DeserializationError::InvalidPayload
+        )?;
 
         let size = (match &field.field_descriptor {
             FieldDescriptor::BaseType(b_type) => {
-                BaseType::size_of(b_type, ptr_len, minimum)
+                BaseType::size_of(b_type, ptr_len)
             },
             FieldDescriptor::ObjectType(_) => {
-                (ptr_len / minimum) as usize
+                ptr_len as usize
             },
             FieldDescriptor::ArrayType(_) => {
-                (ptr_len / minimum) as usize
+                ptr_len as usize
             }
         }) as isize;
 
@@ -369,17 +401,14 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8, minimum: u8) -> Class {
 
 
 
-    let method_count = rdr.read_u16::<BigEndian>().unwrap();
-
-    // let method_map: HashMap<String, HashMap<String, Method>> = (0..method_count).map( |_| {
-    //     let m = Method::from_bytes(&mut rdr, &constant_pool);
-    //     (String::from(&m.name), HashMap::new())
-    // }).collect();
+    let method_count = rdr.read_u16::<BigEndian>()?;
 
     let mut method_map: HashMap<String, HashMap<String, Rc<Method>>> = HashMap::new();
 
     for _ in 0..method_count {
-        let m = Method::from_bytes(&mut rdr, &constant_pool);
+        let m = Method::from_bytes(&mut rdr, &constant_pool).ok_or(
+            DeserializationError::InvalidPayload
+        )?;
 
         if !method_map.contains_key(m.name.as_str()) {
             method_map.insert(m.name.clone(), HashMap::new());
@@ -390,15 +419,15 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8, minimum: u8) -> Class {
             .insert(String::from(&m.descriptor), Rc::new(m));
     }
 
-    let attribute_count = rdr.read_u16::<BigEndian>().unwrap();
+    let attribute_count = rdr.read_u16::<BigEndian>()?;
     // let mut attribute_map: HashMap<&str, Attribute> = HashMap::new();
 
     let attribute_map: HashMap<String, Attribute> = (0..attribute_count).map( |_| {
-        let a = Attribute::from_bytes(&mut rdr, &constant_pool);
+        let a = Attribute::from_bytes(&mut rdr, &constant_pool).unwrap();
         (String::from(&a.attribute_name), a)
     }).collect();
 
-    Class {
+    Result::Ok(Class {
         constant_pool,
         access_flags,
         this_class,
@@ -410,5 +439,5 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8, minimum: u8) -> Class {
         heap_size,
         full_heap_size: heap_size,
         static_been_seen: Rc::new(RwLock::new(false))
-    }
+    })
 }

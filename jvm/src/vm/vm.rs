@@ -61,7 +61,7 @@ impl VirtualMachine {
         frame.local_vars.insert(0, vec![ Type::Reference(Reference::Array(header as *mut u8)) ]);
 
         for arg in args.iter() {
-            let str = self.heap.borrow_mut().create_string(arg, self.class_loader.borrow().get_class("java/lang/String").unwrap());
+            let str = self.heap.borrow_mut().create_string(arg, self.class_loader.borrow_mut().load_and_link_class("java/lang/String").ok().unwrap().1);
 
             unsafe {
                 *body.offset(size_of::<usize>() as isize * index as isize) = str as usize;
@@ -127,6 +127,7 @@ impl Clone for OperandType {
     }
 }
 
+#[derive(Debug)]
 pub struct Operand (pub OperandType, pub usize);
 
 impl Clone for Operand {
@@ -379,8 +380,6 @@ impl RuntimeThread {
 
                 let header_id = unsafe { (*header).id };
 
-                println!("header id {}", header_id);
-
                 let ref_type = match InternArrayType::from_u8(header_id) {
                     InternArrayType::ArrayReference => OperandType::ArrayReference,
                     InternArrayType::ClassReference => OperandType::ClassReference,
@@ -388,13 +387,9 @@ impl RuntimeThread {
                     _ => panic!("Reference in array was not a reference.")
                 };
 
-                println!("uh huh");
-
                 let element = unsafe {
                     body.offset(size_of::<usize>() as isize * index)
                 };
-
-                println!("element pointer @ {}", element as usize);
 
                 frame.op_stack.push(Operand(ref_type, element as usize));
             },
@@ -413,6 +408,15 @@ impl RuntimeThread {
                 let index = (opcode - 0x3b) as u16;
                 let value = frame.op_stack.pop().unwrap().1 as i32;
                 frame.local_vars.insert(index, vec![Type::Int(value)]);
+            },
+            //lstore_<n>
+            0x3f..=0x42 => {
+                let index = (opcode - 0x3f) as u16;
+                let long = frame.op_stack.pop().unwrap().1;
+                frame.local_vars.insert(index, vec![
+                    Type::LongHalf((long >> 32) as u32),
+                    Type::LongHalf((long & 0x7fffffff) as u32)
+                ]);
             },
             //astore_<n>
             0x4b..=0x4e => {
@@ -536,12 +540,13 @@ impl RuntimeThread {
 
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize);
+                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize).unwrap();
 
-                let class = classloader.get_class(&fieldref.class_name);
+                let class = classloader.get_class(&fieldref.class_name).unwrap();
+
                 let object_ref = frame.op_stack.pop().unwrap().1;
 
-                let value = self.heap.borrow().get_field::<usize>(object_ref, class.unwrap(), &fieldref.name);
+                let value = self.heap.borrow().get_field::<usize>(object_ref, class, &fieldref.name);
                 let fd = FieldDescriptor::parse(&fieldref.descriptor);
 
                 let operand = match fd {
@@ -560,20 +565,20 @@ impl RuntimeThread {
                 //TODO: type checking, exceptions
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize);
+                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize).unwrap();
 
                 let class = classloader.get_class(&fieldref.class_name);
 
                 let value = frame.op_stack.pop().unwrap();
                 let object_ref = frame.op_stack.pop().unwrap().1;
 
-                self.heap.borrow().put_field(object_ref, class.unwrap(), &fieldref.name, value.1);
+                heap.put_field(object_ref, class.unwrap(), &fieldref.name, value.1);
             },
             //invokevirtual
             0xb6 => {
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).unwrap();
 
                 let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor);
 
@@ -679,7 +684,7 @@ impl RuntimeThread {
             0xb7 => {
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).unwrap();
 
                 let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor);
 
@@ -691,7 +696,7 @@ impl RuntimeThread {
 
                 if {
                     (method_class.access_flags & 0x20 == 0x20)
-                    && classloader.recurse_is_superclass(frame.class.clone(), &method_class.this_class)
+                    && classloader.recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
                     && resolved_method.name != "<init>"
                 } {
                     to_invoke = classloader.recurse_resolve_supermethod_special(
@@ -746,7 +751,7 @@ impl RuntimeThread {
             0xb8 => { //invokestatic
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize);
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).unwrap();
 
                 let class = classloader.get_class(method_ref.class_name.as_str()).unwrap(); //Load the class if it isn't already loaded
 
@@ -786,33 +791,35 @@ impl RuntimeThread {
                                 let (header, body) = Heap::get_array::<u8>(*chars_ptr as *mut u8);
                                 let length = (*header).size;
 
+                                println!("Array length {}", length);
+
                                 for i in 0..length {
-                                    let char = *(body.offset(
-                                        // (length as isize - i as isize - 1)
-                                        (i as isize) * size_of::<u8>() as isize
-                                    ));
+                                    let char = *(body.offset(i as isize));
                                     string_bytes.push(char);
                                 }
 
                                 let str = String::from_utf8(string_bytes).unwrap();
-                                eprintln!("{}", str);
+                                println!("{}", str);
 
                                 Option::None
                             }
                         },
                         "Main|get_time" => {
-
                             let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
 
-                            let half1 = ((epoch >> 32) & 0xFFFFFFFFF) as u32;
-                            let half2 = (epoch & 0xFFFFFFFFF) as u32;
-
                             let ops_out: Vec<Operand> = vec![
-                                Operand(OperandType::Long, half1 as usize),
-                                Operand(OperandType::Long, half2 as usize)
+                                Operand(OperandType::Long, epoch as usize),
                             ];
 
                             Option::Some(ops_out)
+                        },
+                        "Main|print_long" => {
+                            println!("{:?}", frame.op_stack);
+                            let long = frame.op_stack.pop().unwrap().1;
+
+                            println!("Long: {}", long);
+
+                            Option::None
                         },
                         "Main|get_int" => {
                             Option::Some(vec![
@@ -824,6 +831,9 @@ impl RuntimeThread {
 
                     if operands_out.is_some() {
                         let operands = operands_out.unwrap();
+
+                        println!("{:?}", operands);
+
                         for x in operands.iter() {
                             frame.op_stack.push(x.clone());
                         }
@@ -933,13 +943,6 @@ impl RuntimeThread {
         }
 
         Result::Ok(())
-    }
-
-    pub fn debug_op_stack(&self) {
-        println!("\nDebug operands\n");
-        for val in self.stack.last().unwrap().op_stack.iter() {
-            println!("Type: {:?}      Value: {}", val.0, val.1);
-        }
     }
 
     pub fn get_stack_count(&self) -> usize {

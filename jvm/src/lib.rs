@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![feature(seek_convenience)]
 pub mod vm;
 
 #[cfg(test)]
