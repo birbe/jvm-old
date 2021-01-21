@@ -43,13 +43,22 @@ let vm = VirtualMachine::new(classpath_root);
 
 vm.class_loader.borrow_mut().load_and_link_class("classpath of main class");
 
-let thread = vm.spawn_thread(
+vm.spawn_thread(
     String::from("Main thread"), 
+    "Main", //classpath
     "main", 
-    "([Ljava/lang/String;)V", 
-    main.clone(), //Reference to the class
+    "([Ljava/lang/String;)V", //method returns void, takes String[]
     vec![ //String arguments
         String::from("String arguments!")
     ]
 );
+
+let mut mut_thread = vm.threads.get_mut("Main thread").unwrap();
+
+while mut_thread.get_stack_count() > 0 {
+    match mut_thread.step() {
+        Ok(_) => {}
+        Err(e) => panic!(format!("JVM errored while stepping! Error:\n{:?}", e))
+    }
+}
 ```

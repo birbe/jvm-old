@@ -11,7 +11,7 @@ use jvm::vm::linker::loader::ClassLoader;
 use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits, ImportType, Caller};
 use wasmtime::Memory;
 
-use std::io::Write;
+use std::io::{Write, Error};
 use clap::{App, Arg};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
@@ -141,7 +141,10 @@ fn run_vm(path: PathBuf) {
         start = SystemTime::now();
 
         while mut_thread.get_stack_count() > 0 {
-            mut_thread.step();
+            match mut_thread.step() {
+                Ok(_) => {}
+                Err(e) => panic!(format!("{:?}", e))
+            }
         }
     }
 
