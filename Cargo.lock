@@ -542,6 +542,7 @@ dependencies = [
 name = "jvm-test"
 version = "0.1.0"
 dependencies = [
+ "byteorder",
  "clap",
  "jvm",
  "wasm",

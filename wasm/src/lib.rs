@@ -1,3 +1,7 @@
+#![feature(try_trait)]
+
+mod ir;
+
 use jvm;
 use jvm::vm::class::{Class, Method, MethodDescriptor, FieldDescriptor, BaseType, MethodReturnType, AccessFlags};
 use std::rc::Rc;
@@ -13,9 +17,11 @@ use byteorder::{ReadBytesExt, BigEndian, LittleEndian, ByteOrder};
 use jvm::vm::vm::VirtualMachine;
 use jvm::vm::linker::loader::ClassLoader;
 use std::cmp::max;
-use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId, FunctionKind, ExportItem, ImportKind, Memory};
+use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId, FunctionKind, ExportItem, ImportKind, Memory, InstrSeqBuilder};
 use walrus::ir::Instr::Binop;
-use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr};
+use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value};
+use std::io;
+use std::option::NoneError;
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
@@ -46,7 +52,7 @@ fn field_descriptor_as_value_type(fd: &FieldDescriptor) -> ValType {
 pub enum ResourceType {
     U32(u32),
     I32(i32),
-    String(String),
+    UTF8(String),
     ObjectInstance {
         classpath_offset: u32,
         fields: Vec<u8>,
@@ -60,7 +66,7 @@ impl ResourceType {
         match &self {
             ResourceType::U32(_) => 4,
             ResourceType::I32(_) => 4,
-            ResourceType::String(str) => str.len() as u32 + 4,
+            ResourceType::UTF8(str) => (str.len() * 2) as u32 + 4,
             ResourceType::ObjectInstance { classpath_offset, fields_length, .. } => 4 + *fields_length as u32,
             ResourceType::Null => 1
         }
@@ -78,10 +84,14 @@ impl ResourceType {
                 LittleEndian::write_i32(&mut buf[..], *i);
                 buf.into()
             },
-            ResourceType::String(string) => {
+            ResourceType::UTF8(string) => {
                 let mut vec = vec![0,0,0,0];
-                LittleEndian::write_i32(&mut vec[..], string.len() as i32);
-                vec.extend_from_slice(string.as_bytes());
+                LittleEndian::write_u32(&mut vec[..], string.len() as u32);
+
+                for char in string.as_bytes() {
+                    vec.push(*char);
+                    vec.push(0);
+                }
 
                 vec
             }
@@ -129,7 +139,7 @@ impl MemoryLayout {
             resources: vec![
                 Resource { res_type: ResourceType::U32(1 + 16 + 4), offset: 0 }, //Heap size, including the heap size u32
                 Resource { res_type: ResourceType::Null, offset: 4 }, //Only needs to be 1 byte long
-                Resource { res_type: ResourceType::String(String::from("java/lang/String")), offset: 5 }
+                Resource { res_type: ResourceType::UTF8(String::from("java/lang/String")), offset: 5 }
             ],
             strings: HashMap::new(),
             constant_resource_map: HashMap::new(),
@@ -163,11 +173,14 @@ impl MemoryLayout {
     }
 
     pub fn allocate_string(&mut self, string: String, string_class: &Class) -> usize {
-        let size = string_class.full_heap_size + 1; //Following the memory layout
+        let size = string_class.full_heap_size + 4; //Following the memory layout
 
-        let utf8 = self.append_resource(ResourceType::String(string));
+        let resource_index = self.append_resource(ResourceType::UTF8(string));
+        let utf8 = self.resources.get(
+            resource_index
+        ).unwrap().offset;
 
-        let mut fields = Vec::with_capacity(4);
+        let mut fields = vec![0, 0, 0, 0];
 
         LittleEndian::write_i32(&mut fields[..], utf8 as i32);
 
@@ -259,12 +272,8 @@ pub struct SerializedMemory {
 }
 
 macro_rules! xload_n {
-    ($n:expr, $md:ident, $params:ident, $variables:ident) => {
-        if($n > $md.parameters.len()) {
-            $variables.get(&$n)?.clone()
-        } else {
-            $params.get($n)?.clone()
-        }
+    ($n:expr, $md:ident, $variables:ident) => {
+        $variables.get(&$n).ok_or(CompilationError::UnknownLocal($n))?.clone()
     }
 }
 
@@ -276,6 +285,33 @@ pub struct WasmEmitter<'classloader> {
 
     pub class_resource_map: HashMap<String, u32>, //String being the classpath, and the u32 being a location in the resources
     pub main_export: String
+}
+
+#[derive(Debug)]
+pub enum CompilationError {
+    UnknownLocal(usize),
+    InvalidBytecode,
+    EOF,
+    NoneError,
+    MethodNotFound
+}
+
+impl From<io::Error> for CompilationError {
+    fn from(_: io::Error) -> Self {
+        Self::EOF
+    }
+}
+
+impl From<NoneError> for CompilationError {
+    fn from(_: NoneError) -> Self {
+        Self::NoneError
+    }
+}
+
+macro_rules! push_op {
+    ( $stack:ident, $instr:expr ) => {
+        stack.last_mut().unwrap().push($instr);
+    }
 }
 
 impl<'classloader> WasmEmitter<'classloader> {
@@ -375,6 +411,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
         for (classpath, class) in self.class_loader.class_map.iter() {
             let clazz = class.unwrap();
+
             self.process_class(clazz.as_ref());
         }
     }
@@ -422,7 +459,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                         formatted
                     );
 
-                    let param_locals: Vec<LocalId> = method_descriptor.parameters.iter().map(|x| self.module.locals.add(field_descriptor_as_value_type(x))).collect();
+                    let param_locals: Vec<LocalId> = params_vec.iter().map(|x| self.module.locals.add(*x)).collect();
 
                     let id = builder.finish(
                         param_locals.clone(),
@@ -461,29 +498,47 @@ impl<'classloader> WasmEmitter<'classloader> {
         if method.attribute_map.contains_key("Code") {
             if let AttributeItem::Code(code) = &method.attribute_map.get("Code")?.info {
 
-                let mut locals = Self::analyze_locals(code, class);
+                let mut bytecode_locals = Self::analyze_locals(code, class);
+
+                let pre_params = self.method_function_map.get(&formatted)?.unwrap_normal().1;
 
                 let mut java_locals = HashMap::new();
 
                 let mut min_local_index = 0;
                 let mut max_local_index = 0;
 
-                for local in locals.iter() {
+                for local in bytecode_locals.iter() {
                     if *local.0 < min_local_index { min_local_index = *local.0; }
                     if *local.0 > max_local_index { max_local_index = *local.0; }
                 }
 
-                let max_parameter_index = max(method_descriptor.parameters.len() as isize - 1, 0);
+                let params_length = if method.access_flags & 0x8 == 0 { //not static
+                    method_descriptor.parameters.len() + 1
+                } else {
+                    method_descriptor.parameters.len()
+                };
+
+                let max_parameter_index = max(params_length as isize - 1, 0);
 
                 let local_variables_not_params = max(max_local_index as isize - max_parameter_index, 0) as usize;
 
-                for index in 0..local_variables_not_params {
-                    let offset = method_descriptor.parameters.len()+index;
-
-                    java_locals.insert(offset, self.module.locals.add(locals.get(&offset).unwrap().clone()));
+                for index in 0..params_length {
+                    java_locals.insert(
+                        index,
+                        pre_params.get(index).expect(&format!("{} {} {} {:?}", method.name, index, class.this_class, pre_params)).clone()
+                    );
                 }
 
-                self.compile_bytecode(code, method, class, java_locals);
+                for index in 0..local_variables_not_params {
+                    let offset = params_length+index;
+
+                    java_locals.insert(offset, self.module.locals.add(bytecode_locals.get(&offset).unwrap().clone()));
+                }
+
+                match self.compile_bytecode(code, method, class, java_locals) {
+                    Err(c) => panic!(format!("Failed to compile code for {}\n{:?}", formatted, c)),
+                    Ok(_) => {}
+                };
             }
         }
 
@@ -569,18 +624,19 @@ impl<'classloader> WasmEmitter<'classloader> {
         jvm_locals
     }
 
-    fn compile_bytecode(&mut self, code: &Code, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Option<()> {
+    fn bytecode_as_ir(&mut self, code: &Code, method: &Method, class: &Class) {
+        let mut bytes = Cursor::new(code.code.clone());
+
+        while bytes.position() <
+    }
+
+    fn compile_bytecode(&mut self, code: &Code, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Result<(), CompilationError> {
         let formatted = format_method_name(class, method);
         let method_descriptor = MethodDescriptor::parse(&method.descriptor);
 
-        let (func_id, params) = match self.method_function_map.get(
-            &formatted
-        ).unwrap() {
-            MethodFunctionType::Normal(id, params) => (id, params),
-            MethodFunctionType::NativeImport(_, _) => unreachable!()
-        };
+        let func_id = self.method_function_map.get(&formatted).ok_or(CompilationError::MethodNotFound)?.unwrap_normal().0;
 
-        let mut builder = match &mut self.module.funcs.get_mut(*func_id).kind {
+        let mut builder = match &mut self.module.funcs.get_mut(func_id).kind {
             FunctionKind::Import(_) => unreachable!(),
             FunctionKind::Local(local) => local.builder_mut(),
             FunctionKind::Uninitialized(_) => unreachable!(),
@@ -599,21 +655,33 @@ impl<'classloader> WasmEmitter<'classloader> {
         
         let mut body = builder.func_body();
 
+        let mut i_stack: Vec<Vec<Instr>> = Vec::new();
+
+        i_stack.push(
+            Vec::new()
+        );
+
         while bytes.position() < len as u64 {
             let opcode = bytes.read_u8().unwrap();
 
             match opcode {
                 0x1 => { //aconst_null
-                    body.i32_const(self.memory.null as i32);
+                    push_op!(i_stack, Instr::Const {
+                        value: Value::I32(self.memory.null as i32)
+                    });
                 },
                 0x2..=0x8 => { //iconst_<n-1>
-                    body.i32_const(opcode as i32 - 0x3);
+                    push_op!(i_stack, Instr::Const {
+                        value: Value::I32(opcode as i32 - 0x3)
+                    });
                 },
                 0x10 => {
-                    body.i32_const(bytes.read_u8().unwrap() as i32);
+                    push_op!(i_stack, Instr::Const {
+                        value: Value::I32(bytes.read_u8()? as i32)
+                    });
                 },
                 0x12 => { //ldc
-                    let index = bytes.read_u8().unwrap();
+                    let index = bytes.read_u8()?;
                     
                     match class.constant_pool.get(index as usize).unwrap() {
                         Constant::Integer(int) => { body.i32_const(*int); },
@@ -623,34 +691,34 @@ impl<'classloader> WasmEmitter<'classloader> {
                         Constant::String(string) => {
                             let utf8 = class.constant_pool.resolve_utf8(*string).unwrap();
 
-                            let offset = if !self.memory.strings.contains_key(utf8) {
+                            let resource_index = if !self.memory.strings.contains_key(utf8) {
                                 self.memory.allocate_string(String::from(utf8), self.class_loader.get_class("java/lang/String").unwrap().as_ref())
                             } else {
                                 *self.memory.strings.get(utf8).unwrap()
                             };
 
-                            body.i32_const(offset as i32);
+                            body.i32_const(self.memory.resources.get(resource_index).unwrap().offset as i32);
                         }
                         _ => {}
                     };
                 },
                 0x11 => { //sipush
-                    body.i32_const(bytes.read_u16::<BigEndian>().unwrap() as i32);
+                    body.i32_const(bytes.read_u16::<BigEndian>()? as i32);
                 },
                 0x15..=0x19 => { //iload, lload, fload, dload, aload
-                    body.local_get(xload_n!(bytes.read_u8().unwrap() as usize, method_descriptor, params, java_locals));
+                    body.local_get(xload_n!(bytes.read_u8()? as usize, method_descriptor, java_locals));
                 },
                 0x1a..=0x1d => { //iload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x1a, method_descriptor, params, java_locals));
+                    body.local_get(xload_n!(opcode as usize - 0x1a, method_descriptor, java_locals));
                 },
                 0x1e..=0x21 => { //lload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x1e, method_descriptor, params, java_locals));
+                    body.local_get(xload_n!(opcode as usize - 0x1e, method_descriptor, java_locals));
                 },
                 0x22..=0x25 => { //fload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x22, method_descriptor, params, java_locals));
+                    body.local_get(xload_n!(opcode as usize - 0x22, method_descriptor, java_locals));
                 },
                 0x2a..=0x2d => { //aload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x2a, method_descriptor, params, java_locals));
+                    body.local_get(xload_n!(opcode as usize - 0x2a, method_descriptor, java_locals));
                 },
                 0x32 => { //aaload
                     body.binop(BinaryOp::I32Add);
@@ -686,13 +754,16 @@ impl<'classloader> WasmEmitter<'classloader> {
                     ); //Load the byte/bool
                 },
                 0x3a => { //astore
-                    body.local_set(java_locals.get(&(bytes.read_u8().unwrap() as usize))?.clone());
+                    let local = &(bytes.read_u8().unwrap() as usize);
+                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
                 },
                 0x3b..=0x3e => { //istore_<n>
-                    body.local_set(java_locals.get(&(opcode as usize - 0x3b)).expect(&format!("local {}", opcode as usize - 0x3b)).clone());
+                    let local = &(opcode as usize - 0x3b);
+                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
                 },
                 0x4b..=0x4e => { //astore_<n>
-                    body.local_set(java_locals.get(&(opcode as usize - 0x4b))?.clone());
+                    let local = &(opcode as usize - 0x4b);
+                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
                 },
                 0x53 => { //aastore
                     body.local_set(helper.get(ValType::I32, 0));
@@ -723,14 +794,39 @@ impl<'classloader> WasmEmitter<'classloader> {
                     body.local_get(helper.get(ValType::I32, 0)); //Un-stash the value
                     body.store(
                         self.memory.memory_id,
-                        StoreKind::I32 {
-                            atomic: true
+                        StoreKind::I32_8 {
+                            atomic: false
                         },
                         MemArg {
                             align: 1,
                             offset: 0
                         }
                     );
+                },
+                0x55 => { //castore
+                    //arrayref, index, value
+
+                    body.local_set(helper.get(ValType::I32, 0)) //stash the value
+                        .i32_const(2)
+                        .binop(BinaryOp::I32Mul) //Multiply by two as a char is two bytes
+                        .i32_const(4)
+                        .binop(BinaryOp::I32Add) //(index * 2) + arrayref + 4
+                        .local_get(helper.get(ValType::I32, 0))
+                        .store(
+                            self.memory.memory_id,
+                            StoreKind::I32_16 {
+                                atomic: false
+                            },
+                            MemArg {
+                                align: 1,
+                                offset: 0
+                            }
+                        );
+                },
+                0xa2 => { //if_icmpge
+                    let branch_byte = bytes.read_u16::<BigEndian>()?;
+
+                    body.binop(BinaryOp::I32GeS);
                 },
                 0xac => {
                     body.return_();
@@ -792,8 +888,6 @@ impl<'classloader> WasmEmitter<'classloader> {
                     } else {
                         to_invoke = (method_class, resolved_method);
                     }
-
-                    println!("class {} method {}", to_invoke.0.this_class, to_invoke.1.name);
 
                     let function_id = match self.method_function_map.get(&format_method_name(
                         to_invoke.0.as_ref(),
@@ -875,7 +969,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                         9 => 2,
                         10 => 4,
                         11 => 8,
-                        _ => return Option::None
+                        _ => return Result::Err(
+                            CompilationError::InvalidBytecode
+                        )
                     };
 
                     body.i32_const(size) //The size of the data type
@@ -894,10 +990,10 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     ); //the pointer to the array will be the length itself
                 },
-                _ => unimplemented!("Unimplemented opcode {}", opcode)
+                _ => unimplemented!("Unimplemented opcode {}\nClass: {}\nMethod: {}\nPos: {}", opcode, class.this_class, method.name, bytes.position())
             }
         }
 
-        Option::Some(())
+        Result::Ok(())
     }
 }

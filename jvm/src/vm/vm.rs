@@ -43,9 +43,11 @@ impl VirtualMachine {
         }
     }
 
-    pub fn spawn_thread(&mut self, name: String, method_name: &str, method_descriptor: &str, class: Rc<Class>, args: Vec<String>) -> &RuntimeThread {
+    pub fn spawn_thread(&mut self, thread_name: &str, class: &str, method_name: &str, method_descriptor: &str, args: Vec<String>) -> &RuntimeThread {
 
-        let mut thread = RuntimeThread::new(String::from(&name), self.heap.clone(), self.class_loader.clone());
+        let (_, class) = self.class_loader.borrow_mut().load_and_link_class(class).ok().unwrap();
+
+        let mut thread = RuntimeThread::new(String::from(thread_name), self.heap.clone(), self.class_loader.clone());
 
         let mut frame = RuntimeThread::create_frame(
             class.get_method(method_name, method_descriptor),
@@ -74,9 +76,9 @@ impl VirtualMachine {
             frame
         );
 
-        self.threads.insert(String::from(&name), thread);
+        self.threads.insert(String::from(thread_name), thread);
 
-        self.threads.get(&name).unwrap()
+        self.threads.get(thread_name).unwrap()
     }
 }
 
@@ -952,24 +954,439 @@ impl RuntimeThread {
 }
 
 pub mod bytecode {
+    use std::io::Cursor;
+    use byteorder::ReadBytesExt;
+    use crate::vm::linker::loader::DeserializationError;
+
+    pub struct LookupEntry {
+        lookup_match: i32,
+        offset: i32
+    }
+
     #[allow(non_camel_case_types)]
-    pub enum Instruction {
-        aaload = 0x32,
-        aastore = 0x53,
-        aconst_null = 0x1,
-        aload = 0x19,
-        aload_0 = 0x2a,
-        aload_1 = 0x2b,
-        aload_2 = 0x2c,
-        aload_3 = 0x2d,
-        anewarray = 0xbd,
-        areturn = 0xb0,
-        arraylength = 0xbe,
-        astore = 0x3a,
-        astore_0 = 0x4b,
-        astore_1 = 0x4c,
-        astore_2 = 0x4d,
-        astore_3 = 0x4e,
-        athrow = 0xbf
+    #[derive(Copy, Clone, FromPrimitive)]
+    #[repr(u8)]
+    pub enum Bytecode {
+        Aaload = 0x32,
+        Aastore = 0x53,
+        Aconst_null = 0x1,
+        Aload(u8) = 0x19,
+        Aload_0 = 0x2a,
+        Aload_1 = 0x2b,
+        Aload_2 = 0x2c,
+        Aload_3 = 0x2d,
+        Anewarray(u16) = 0xbd,
+        Areturn = 0xb0,
+        Arraylength = 0xbe,
+        Astore(u8) = 0x3a,
+        Astore_0 = 0x4b,
+        Astore_1 = 0x4c,
+        Astore_2 = 0x4d,
+        Astore_3 = 0x4e,
+        Athrow = 0xbf,
+        Baload = 0x33,
+        Bastore = 0x54,
+        Bipush(u8) = 0x10,
+        Caload = 0x34,
+        Castore = 0x55,
+        Checkcast(u16) = 0xc0,
+        D2f = 0x90,
+        D2i = 0x8e,
+        D2l = 0x8f,
+        Dadd = 0x63,
+        Daload = 0x31,
+        Dastore = 0x52,
+        Dcmpg = 0x98,
+        Dcmpl = 0x97,
+        Dconst_0 = 0xe,
+        Dconst_1 = 0xf,
+        Ddiv = 0x6f,
+        Dload(u8) = 0x18,
+        Dload_0 = 0x26,
+        Dload_1 = 0x27,
+        Dload_2 = 0x28,
+        Dload_3 = 0x29,
+        Dmul = 0x6b,
+        Dneg = 0x77,
+        Drem = 0x73,
+        Dreturn = 0xaf,
+        Dstore(u8) = 0x39,
+        Dstore_0 = 0x47,
+        Dstore_1 = 0x48,
+        Dstore_2 = 0x49,
+        Dstore_3 = 0x4a,
+        Dsub = 0x67,
+        Dup = 0x59,
+        Dup_x2 = 0x5b,
+        Dup2 = 0x5c,
+        Dup2_x1 = 0x5d,
+        Dup2_x2 = 0x5e,
+        F2d = 0x8d,
+        F2i = 0x8b,
+        F2l = 0x8c,
+        Fadd = 0x62,
+        Faload = 0x30,
+        Fastore = 0x51,
+        Fcmpg = 0x96,
+        Fcmpl = 0x95,
+        Fconst_0 = 0xb,
+        Fconst_1 = 0xc,
+        Fconst_2 = 0xd,
+        Fdiv = 0x6e,
+        Fload(u8) = 0x17,
+        Fload_0 = 0x22,
+        Fload_1 = 0x23,
+        Fload_2 = 0x24,
+        Fload_3 = 0x25,
+        Fmul = 0x6a,
+        Fneg = 0x76,
+        Frem = 0x72,
+        Freturn = 0xae,
+        Fstore(u8) = 0x38,
+        Fstore_0 = 0x43,
+        Fstore_1 = 0x44,
+        Fstore_2 = 0x45,
+        Fstore_3 = 0x46,
+        Fsub = 0x66,
+        Getfield(u16) = 0xb4,
+        Getstatic(u16) = 0xb2,
+        Goto(u16) = 0xa7,
+        Goto_w(u32) = 0xc8,
+        I2b = 0x91,
+        I2c = 0x92,
+        I2d = 0x87,
+        I2f = 0x86,
+        I2l = 0x85,
+        I2s = 0x93,
+        Iadd = 0x60,
+        Iaload = 0x2e,
+        Iand = 0x7e,
+        Iastore = 0x4f,
+        Iconst_m1 = 0x2,
+        Iconst_0 = 0x3,
+        Iconst_1 = 0x4,
+        Iconst_2 = 0x5,
+        Iconst_3 = 0x6,
+        Iconst_4 = 0x7,
+        Iconst_5 = 0x8,
+        Idiv = 0x6c,
+        If_acmpeq(u16) = 0xa5,
+        If_acmpne(u16) = 0xa6,
+        If_icmpeq(u16) = 0x9f,
+        If_icmpne(u16) = 0xa0,
+        If_icmplt(u16) = 0xa1,
+        If_icmpge(u16) = 0xa2,
+        If_icmpgt(u16) = 0xa3,
+        If_icmple(u16) = 0xa4,
+        Ifeq(u16) = 0x99,
+        Ifne(u16) = 0x9a,
+        Iflt(u16) = 0x9b,
+        Ifge(u16) = 0x9c,
+        Ifgt(u16) = 0x9d,
+        Ifle(u16) = 0x9e,
+        Ifnonnull(u16) = 0xc7,
+        Ifnull(u16) = 0xc6,
+        Iinc(u8, i8) = 0x84,
+        Iload(u8) = 0x15,
+        Iload_0 = 0x1a,
+        Iload_1 = 0x1b,
+        Iload_2 = 0x1c,
+        Iload_3 = 0x1d,
+        Imul = 0x68,
+        Ineg = 0x74,
+        Instanceof(u16) = 0xc1,
+        Invokedynamic(u16) = 0xba,
+        Invokeinterface(u16, u8) = 0xb9,
+        Invokespecial(u16) = 0xb7,
+        Invokestatic(u16) = 0xb8,
+        Invokevirtual(u16) = 0xb6,
+        Ior = 0x80,
+        Irem = 0x70,
+        Ireturn = 0xac,
+        Ishl = 0x78,
+        Ishr = 0x7a,
+        Istore(u8) = 0x36,
+        Istore_0 = 0x3b,
+        Istore_1 = 0x3c,
+        Istore_2 = 0x3d,
+        Istore_3 = 0x3e,
+        Isub = 0x64,
+        Iushr = 0x7c,
+        Ixor = 0x82,
+        Jsr(u16) = 0xa8,
+        Jsr_w(u32) = 0xc9,
+        L2d = 0x8a,
+        L2f = 0x89,
+        L2i = 0x88,
+        Ladd = 0x61,
+        Laload = 0x2f,
+        Land = 0x7f,
+        Lastore = 0x50,
+        Lcmp = 0x94,
+        Lconst_0 = 0x9,
+        Lconst_1 = 0xa,
+        Ldc(u8) = 0x12,
+        Ldc_w(u16) = 0x13,
+        Ldc2_w(u16) = 0x14,
+        Ldiv = 0x6d,
+        Lload(u8) = 0x16,
+        Lload_0 = 0x1e,
+        Lload_1 = 0x1f,
+        Lload_2 = 0x20,
+        Lload_3 = 0x21,
+        Lmul = 0x69,
+        Lneg = 0x75,
+        Lookupswitch(i32, Vec<LookupEntry>) = 0xab, //TODO: might not be right
+        Lor = 0x81,
+        Lrem = 0x71,
+        Lreturn = 0xad,
+        Lshl = 0x79,
+        Lshr = 0x7b,
+        Lstore = 0x37,
+        Lstore_0 = 0x3f,
+        Lstore_1 = 0x40,
+        Lstore_2 = 0x41,
+        Lstore_3 = 0x42,
+        Lsub = 0x65,
+        Lushr = 0x7d,
+        Lxor = 0x83,
+        Monitorenter = 0xc2,
+        Monitorexit = 0xc3,
+        Multianewarray = 0xc5,
+        New = 0xbb,
+        Newarray = 0xbc,
+        Nop = 0x0,
+        Pop = 0x57,
+        Pop2 = 0x58,
+        Putfield = 0xb5,
+        Putstatic = 0xb3,
+        Ret = 0xa9,
+        Return = 0xb1,
+        Saload = 0x35,
+        Sastore = 0x56,
+        Sipush = 0x11,
+        Swap = 0x5f,
+        Tableswitch = 0xaa,
+        Wide = 0xc4
+    }
+
+    pub enum InvalidBytecode {
+    }
+
+    impl Bytecode {
+        fn from_bytes(bytes: &[u8]) -> Result<Vec<Bytecode>, InvalidBytecode> {
+            let mut cursor = Cursor::new(bytes);
+            let b = Vec::new();
+
+            while (cursor.position() as usize) < bytes.len() {
+                b.push(match cursor.read_u8()? as Bytecode {
+                    Bytecode::Aaload => {
+
+                    },
+                    Bytecode::Aastore => {}
+                    Bytecode::Aconst_null => {}
+                    Bytecode::Aload(_) => {}
+                    Bytecode::Aload_0 => {}
+                    Bytecode::Aload_1 => {}
+                    Bytecode::Aload_2 => {}
+                    Bytecode::Aload_3 => {}
+                    Bytecode::Anewarray(_) => {}
+                    Bytecode::Areturn => {}
+                    Bytecode::Arraylength => {}
+                    Bytecode::Astore(_) => {}
+                    Bytecode::Astore_0 => {}
+                    Bytecode::Astore_1 => {}
+                    Bytecode::Astore_2 => {}
+                    Bytecode::Astore_3 => {}
+                    Bytecode::Athrow => {}
+                    Bytecode::Baload => {}
+                    Bytecode::Bastore => {}
+                    Bytecode::Bipush(_) => {}
+                    Bytecode::Caload => {}
+                    Bytecode::Castore => {}
+                    Bytecode::Checkcast(_) => {}
+                    Bytecode::D2f => {}
+                    Bytecode::D2i => {}
+                    Bytecode::D2l => {}
+                    Bytecode::Dadd => {}
+                    Bytecode::Daload => {}
+                    Bytecode::Dastore => {}
+                    Bytecode::Dcmpg => {}
+                    Bytecode::Dcmpl => {}
+                    Bytecode::Dconst_0 => {}
+                    Bytecode::Dconst_1 => {}
+                    Bytecode::Ddiv => {}
+                    Bytecode::Dload(_) => {}
+                    Bytecode::Dload_0 => {}
+                    Bytecode::Dload_1 => {}
+                    Bytecode::Dload_2 => {}
+                    Bytecode::Dload_3 => {}
+                    Bytecode::Dmul => {}
+                    Bytecode::Dneg => {}
+                    Bytecode::Drem => {}
+                    Bytecode::Dreturn => {}
+                    Bytecode::Dstore(_) => {}
+                    Bytecode::Dstore_0 => {}
+                    Bytecode::Dstore_1 => {}
+                    Bytecode::Dstore_2 => {}
+                    Bytecode::Dstore_3 => {}
+                    Bytecode::Dsub => {}
+                    Bytecode::Dup => {}
+                    Bytecode::Dup_x2 => {}
+                    Bytecode::Dup2 => {}
+                    Bytecode::Dup2_x1 => {}
+                    Bytecode::Dup2_x2 => {}
+                    Bytecode::F2d => {}
+                    Bytecode::F2i => {}
+                    Bytecode::F2l => {}
+                    Bytecode::Fadd => {}
+                    Bytecode::Faload => {}
+                    Bytecode::Fastore => {}
+                    Bytecode::Fcmpg => {}
+                    Bytecode::Fcmpl => {}
+                    Bytecode::Fconst_0 => {}
+                    Bytecode::Fconst_1 => {}
+                    Bytecode::Fconst_2 => {}
+                    Bytecode::Fdiv => {}
+                    Bytecode::Fload(_) => {}
+                    Bytecode::Fload_0 => {}
+                    Bytecode::Fload_1 => {}
+                    Bytecode::Fload_2 => {}
+                    Bytecode::Fload_3 => {}
+                    Bytecode::Fmul => {}
+                    Bytecode::Fneg => {}
+                    Bytecode::Frem => {}
+                    Bytecode::Freturn => {}
+                    Bytecode::Fstore(_) => {}
+                    Bytecode::Fstore_0 => {}
+                    Bytecode::Fstore_1 => {}
+                    Bytecode::Fstore_2 => {}
+                    Bytecode::Fstore_3 => {}
+                    Bytecode::Fsub => {}
+                    Bytecode::Getfield(_) => {}
+                    Bytecode::Getstatic(_) => {}
+                    Bytecode::Goto(_) => {}
+                    Bytecode::Goto_w(_) => {}
+                    Bytecode::I2b => {}
+                    Bytecode::I2c => {}
+                    Bytecode::I2d => {}
+                    Bytecode::I2f => {}
+                    Bytecode::I2l => {}
+                    Bytecode::I2s => {}
+                    Bytecode::Iadd => {}
+                    Bytecode::Iaload => {}
+                    Bytecode::Iand => {}
+                    Bytecode::Iastore => {}
+                    Bytecode::Iconst_m1 => {}
+                    Bytecode::Iconst_0 => {}
+                    Bytecode::Iconst_1 => {}
+                    Bytecode::Iconst_2 => {}
+                    Bytecode::Iconst_3 => {}
+                    Bytecode::Iconst_4 => {}
+                    Bytecode::Iconst_5 => {}
+                    Bytecode::Idiv => {}
+                    Bytecode::If_acmpeq(_) => {}
+                    Bytecode::If_acmpne(_) => {}
+                    Bytecode::If_icmpeq(_) => {}
+                    Bytecode::If_icmpne(_) => {}
+                    Bytecode::If_icmplt(_) => {}
+                    Bytecode::If_icmpge(_) => {}
+                    Bytecode::If_icmpgt(_) => {}
+                    Bytecode::If_icmple(_) => {}
+                    Bytecode::Ifeq(_) => {}
+                    Bytecode::Ifne(_) => {}
+                    Bytecode::Iflt(_) => {}
+                    Bytecode::Ifge(_) => {}
+                    Bytecode::Ifgt(_) => {}
+                    Bytecode::Ifle(_) => {}
+                    Bytecode::Ifnonnull(_) => {}
+                    Bytecode::Ifnull(_) => {}
+                    Bytecode::Iinc(_, _) => {}
+                    Bytecode::Iload(_) => {}
+                    Bytecode::Iload_0 => {}
+                    Bytecode::Iload_1 => {}
+                    Bytecode::Iload_2 => {}
+                    Bytecode::Iload_3 => {}
+                    Bytecode::Imul => {}
+                    Bytecode::Ineg => {}
+                    Bytecode::Instanceof(_) => {}
+                    Bytecode::Invokedynamic(_) => {}
+                    Bytecode::Invokeinterface(_, _) => {}
+                    Bytecode::Invokespecial(_) => {}
+                    Bytecode::Invokestatic(_) => {}
+                    Bytecode::Invokevirtual(_) => {}
+                    Bytecode::Ior => {}
+                    Bytecode::Irem => {}
+                    Bytecode::Ireturn => {}
+                    Bytecode::Ishl => {}
+                    Bytecode::Ishr => {}
+                    Bytecode::Istore(_) => {}
+                    Bytecode::Istore_0 => {}
+                    Bytecode::Istore_1 => {}
+                    Bytecode::Istore_2 => {}
+                    Bytecode::Istore_3 => {}
+                    Bytecode::Isub => {}
+                    Bytecode::Iushr => {}
+                    Bytecode::Ixor => {}
+                    Bytecode::Jsr(_) => {}
+                    Bytecode::Jsr_w(_) => {}
+                    Bytecode::L2d => {}
+                    Bytecode::L2f => {}
+                    Bytecode::L2i => {}
+                    Bytecode::Ladd => {}
+                    Bytecode::Laload => {}
+                    Bytecode::Land => {}
+                    Bytecode::Lastore => {}
+                    Bytecode::Lcmp => {}
+                    Bytecode::Lconst_0 => {}
+                    Bytecode::Lconst_1 => {}
+                    Bytecode::Ldc(_) => {}
+                    Bytecode::Ldc_w(_) => {}
+                    Bytecode::Ldc2_w(_) => {}
+                    Bytecode::Ldiv => {}
+                    Bytecode::Lload(_) => {}
+                    Bytecode::Lload_0 => {}
+                    Bytecode::Lload_1 => {}
+                    Bytecode::Lload_2 => {}
+                    Bytecode::Lload_3 => {}
+                    Bytecode::Lmul => {}
+                    Bytecode::Lneg => {}
+                    Bytecode::Lookupswitch(_, _) => {}
+                    Bytecode::Lor => {}
+                    Bytecode::Lrem => {}
+                    Bytecode::Lreturn => {}
+                    Bytecode::Lshl => {}
+                    Bytecode::Lshr => {}
+                    Bytecode::Lstore => {}
+                    Bytecode::Lstore_0 => {}
+                    Bytecode::Lstore_1 => {}
+                    Bytecode::Lstore_2 => {}
+                    Bytecode::Lstore_3 => {}
+                    Bytecode::Lsub => {}
+                    Bytecode::Lushr => {}
+                    Bytecode::Lxor => {}
+                    Bytecode::Monitorenter => {}
+                    Bytecode::Monitorexit => {}
+                    Bytecode::Multianewarray => {}
+                    Bytecode::New => {}
+                    Bytecode::Newarray => {}
+                    Bytecode::Nop => {}
+                    Bytecode::Pop => {}
+                    Bytecode::Pop2 => {}
+                    Bytecode::Putfield => {}
+                    Bytecode::Putstatic => {}
+                    Bytecode::Ret => {}
+                    Bytecode::Return => {}
+                    Bytecode::Saload => {}
+                    Bytecode::Sastore => {}
+                    Bytecode::Sipush => {}
+                    Bytecode::Swap => {}
+                    Bytecode::Tableswitch => {}
+                    Bytecode::Wide => {}
+                }
+            }
+
+            b
+        }
     }
 }

@@ -29,3 +29,27 @@ WASM-Compiler roadmap
 - [x] Get basic bytecode compiled to WASM
 - [ ] Get heap allocation working
 - [ ] Basic stop-the-world garbage collection
+
+---
+
+## Usage
+
+Interpreted mode
+
+```Rust
+let classpath_root = PathBuf::from("path to root of compiled classes");
+
+let vm = VirtualMachine::new(classpath_root);
+
+vm.class_loader.borrow_mut().load_and_link_class("classpath of main class");
+
+let thread = vm.spawn_thread(
+    String::from("Main thread"), 
+    "main", 
+    "([Ljava/lang/String;)V", 
+    main.clone(), //Reference to the class
+    vec![ //String arguments
+        String::from("String arguments!")
+    ]
+);
+```

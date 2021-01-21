@@ -3,15 +3,17 @@ use jvm;
 use std::fs;
 use std::env::current_dir;
 
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use jvm::vm::vm::VirtualMachine;
 use std::path::PathBuf;
 use wasm::WasmEmitter;
 use jvm::vm::linker::loader::ClassLoader;
-use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits};
-use wasmtime::Extern::Memory;
+use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits, ImportType, Caller};
+use wasmtime::Memory;
+
 use std::io::Write;
 use clap::{App, Arg};
+use byteorder::{BigEndian, ByteOrder, LittleEndian};
 
 fn main() {
     let dir = current_dir().unwrap();
@@ -54,8 +56,6 @@ fn main() {
 
         let (wasm, memory) = wasm.build();
 
-        println!("{}", String::from_utf8(memory.data.clone()).unwrap());
-
         fs::write("./jvm_test/wasm_out/out.wasm", &wasm);
 
         {
@@ -63,19 +63,51 @@ fn main() {
 
             let module = Module::from_binary(store.engine(), &wasm[..]).unwrap();
 
+            let get_time = Func::wrap(&store, || {
+                return SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+            });
+
+            let print_long = Func::wrap(&store, |x: i64| {
+                println!("Printed long {}", x);
+            });
+
             let print_int = Func::wrap(&store, |x: i32| {
                 println!("{}", x);
             });
 
-            let print_string = Func::wrap(&store, |x: i32| {
-                println!("String location: {}", x);
+            let print_string = Func::wrap(&store,|caller: Caller, x: i32| {
+                let memory = caller.get_export("heap").unwrap().into_memory().unwrap();
+
+                unsafe {
+                    let data = memory.data_unchecked();
+
+                    let str = String::from_utf8(Vec::from(&data[4..100])).unwrap();
+
+                    println!("{}", str);
+
+                    let u = x as usize;
+                    let classpath_utf8_ptr = LittleEndian::read_u32(&data[u..u+4]) as usize;
+                    let classpath_utf8_len = LittleEndian::read_u32(&data[classpath_utf8_ptr..classpath_utf8_ptr+4]);
+
+                    let char_arr_ptr = LittleEndian::read_u32(&data[u+4..u+8]) as usize;
+                    let char_arr_len = LittleEndian::read_u32(&data[char_arr_ptr..char_arr_ptr+4]) as usize;
+
+                    let chars = &data[char_arr_ptr+4..char_arr_ptr + (char_arr_len * 2) + 4];
+
+                    println!("{}", String::from_utf8(Vec::from(chars)).unwrap());
+                }
             });
 
-            let imports = [print_int.into(), print_string.into()];
+            let mut imports = vec![
+                print_string.into(),
+                // print_int.into()
+            ];
 
             let instance = Instance::new(&store, &module, &imports).unwrap();
 
             let heap = instance.get_export("heap").unwrap().into_memory().unwrap();
+
+            let mem_ptr = heap.data_ptr();
 
             unsafe {
                 heap.data_unchecked_mut().write(&memory.data[..]);
@@ -100,7 +132,7 @@ fn run_vm(path: PathBuf) {
 
         vm.start_time = SystemTime::now();
 
-        let thread = vm.spawn_thread(String::from("Main"), "main", "([Ljava/lang/String;)V", main.clone(), vec![
+        let thread = vm.spawn_thread("Main thread", "Main", "main", "([Ljava/lang/String;)V", vec![
             String::from("Hello world!")
         ]);
 
