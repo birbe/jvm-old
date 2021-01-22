@@ -20,15 +20,18 @@ Classloader status
 Interpreter roadmap
 
 - [x] Get basic bytecode running in interpreted mode
-- [x] Get heap allocation and object creation working in interpreted mode
+- [x] Get heap allocation and object creation working
 - [ ] Basic stop-the-world garbage collection
 - [ ] Get the OpenJDK 7 source to load and run.
   
 WASM-Compiler roadmap
 
 - [x] Get basic bytecode compiled to WASM
+- [ ] Control flow*
 - [ ] Get heap allocation working
 - [ ] Basic stop-the-world garbage collection
+
+*: see technical constraints
 
 ---
 
@@ -62,3 +65,23 @@ while mut_thread.get_stack_count() > 0 {
     }
 }
 ```
+
+---
+
+## Technical Constraints
+
+#### Control flow
+
+Java bytecode uses arbitrary goto/jump instructions, which does not directly
+map to WASM. WASM uses a static "block" format, where you define sets of instructions,
+of which you can then run commands to go to. Control flow will thus take
+more time to get working in the WASM compiler than in the interpreted mode,
+but it is technically possible.
+
+#### JIT/Interpreted mode
+
+Due to the current lack of stable support for dynamic linking in WASM,
+it's not possible to have a mixed execution mode like you can find in the Oracle JVM,
+which is able to gather statistics on hotspots within bytecode, and JIT them to native code
+to have them run faster. Technically the only benefit of this would potentially be somewhat
+smaller memory usage, but this overhead shouldn't matter.
