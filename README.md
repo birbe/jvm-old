@@ -42,7 +42,7 @@ WASM-Compiler roadmap
 
 ---
 
-## Usage
+## Library Usage
 
 Interpreted mode
 
@@ -72,6 +72,14 @@ while mut_thread.get_stack_count() > 0 {
     }
 }
 ```
+
+Or, run the jvm_test package
+
+```
+cargo run -p jvm_test -- --mode [Mode]
+```
+
+Mode: i (interpreted) OR wasm (compile to wasm and execute with Wasmtime)
 
 ---
 
