@@ -29,7 +29,7 @@ impl ControlFlow {
         for index in 0..self.bytecode.len() {
             let instr = self.bytecode.get(index).unwrap();
 
-            let byte_index = self.sourcemap.get(&index).unwrap();
+            let byte_index = *self.sourcemap.get(&index).unwrap();
 
             match instr {
                 Bytecode::Goto(offset) |
@@ -49,8 +49,9 @@ impl ControlFlow {
                 Bytecode::Ifle(offset) |
                 Bytecode::Ifnonnull(offset) |
                 Bytecode::Ifnull(offset) => {
-                    // let entry: &mut Intermediate1 = self.pass_1.get_mut((byte_index as isize) + (*offset as i16)).unwrap();
-                    // entry.1 = true;
+                    let index = (byte_index as isize) + (*offset as isize);
+                    let entry: &mut Intermediate1 = self.pass_1.get_mut(index as usize).unwrap();
+                    entry.1 = true;
                 },
 
                 Bytecode::Jsr(_) => unimplemented!(),

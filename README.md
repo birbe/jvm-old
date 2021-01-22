@@ -22,7 +22,10 @@ than JITed code.
 Classloader status
 
 - [x] Deserialize Java 7 classes
-- [ ] Cleanup the serialization code
+- [ ] Type-checking of the bytecode (!)
+- [ ] Cleanup the deserialization code (somewhat done)
+
+Currently, none of the code is type-checked, so only input Java that you trust.
 
 Interpreter roadmap
 
