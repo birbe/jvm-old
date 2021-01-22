@@ -17,7 +17,7 @@ use std::mem::size_of;
 use core::ptr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::iter::FromIterator;
-use crate::vm::heap::{Heap, InternArrayType, Type, Reference, ObjectInfo};
+use crate::vm::heap::{Heap, InternArrayType, Type, Reference, Object};
 use std::sync::Mutex;
 
 static mut BENCHMARKS: u16 = 0;
@@ -957,14 +957,26 @@ pub mod bytecode {
     use std::io::Cursor;
     use byteorder::ReadBytesExt;
     use crate::vm::linker::loader::DeserializationError;
+    use std::rc::Rc;
 
+    #[derive(Clone)]
     pub struct LookupEntry {
         lookup_match: i32,
         offset: i32
     }
 
+    // macro_rules! bytecodes {
+    //     (
+    //         pub? enum Bytecode \{
+    //             $($name:ident = $code:literal),
+    //         \}
+    //     ) => {
+    //
+    //     }
+    // }
+
     #[allow(non_camel_case_types)]
-    #[derive(Copy, Clone, FromPrimitive)]
+    #[derive(Clone)]
     #[repr(u8)]
     pub enum Bytecode {
         Aaload = 0x32,
@@ -1136,7 +1148,8 @@ pub mod bytecode {
         Lload_3 = 0x21,
         Lmul = 0x69,
         Lneg = 0x75,
-        Lookupswitch(i32, Vec<LookupEntry>) = 0xab, //TODO: might not be right
+        Lookupswitch(i32, Vec<LookupEntry>) = 0xab,
+        //TODO: might not be right
         Lor = 0x81,
         Lrem = 0x71,
         Lreturn = 0xad,
@@ -1168,225 +1181,5 @@ pub mod bytecode {
         Swap = 0x5f,
         Tableswitch = 0xaa,
         Wide = 0xc4
-    }
-
-    pub enum InvalidBytecode {
-    }
-
-    impl Bytecode {
-        fn from_bytes(bytes: &[u8]) -> Result<Vec<Bytecode>, InvalidBytecode> {
-            let mut cursor = Cursor::new(bytes);
-            let b = Vec::new();
-
-            while (cursor.position() as usize) < bytes.len() {
-                b.push(match cursor.read_u8()? as Bytecode {
-                    Bytecode::Aaload => {
-
-                    },
-                    Bytecode::Aastore => {}
-                    Bytecode::Aconst_null => {}
-                    Bytecode::Aload(_) => {}
-                    Bytecode::Aload_0 => {}
-                    Bytecode::Aload_1 => {}
-                    Bytecode::Aload_2 => {}
-                    Bytecode::Aload_3 => {}
-                    Bytecode::Anewarray(_) => {}
-                    Bytecode::Areturn => {}
-                    Bytecode::Arraylength => {}
-                    Bytecode::Astore(_) => {}
-                    Bytecode::Astore_0 => {}
-                    Bytecode::Astore_1 => {}
-                    Bytecode::Astore_2 => {}
-                    Bytecode::Astore_3 => {}
-                    Bytecode::Athrow => {}
-                    Bytecode::Baload => {}
-                    Bytecode::Bastore => {}
-                    Bytecode::Bipush(_) => {}
-                    Bytecode::Caload => {}
-                    Bytecode::Castore => {}
-                    Bytecode::Checkcast(_) => {}
-                    Bytecode::D2f => {}
-                    Bytecode::D2i => {}
-                    Bytecode::D2l => {}
-                    Bytecode::Dadd => {}
-                    Bytecode::Daload => {}
-                    Bytecode::Dastore => {}
-                    Bytecode::Dcmpg => {}
-                    Bytecode::Dcmpl => {}
-                    Bytecode::Dconst_0 => {}
-                    Bytecode::Dconst_1 => {}
-                    Bytecode::Ddiv => {}
-                    Bytecode::Dload(_) => {}
-                    Bytecode::Dload_0 => {}
-                    Bytecode::Dload_1 => {}
-                    Bytecode::Dload_2 => {}
-                    Bytecode::Dload_3 => {}
-                    Bytecode::Dmul => {}
-                    Bytecode::Dneg => {}
-                    Bytecode::Drem => {}
-                    Bytecode::Dreturn => {}
-                    Bytecode::Dstore(_) => {}
-                    Bytecode::Dstore_0 => {}
-                    Bytecode::Dstore_1 => {}
-                    Bytecode::Dstore_2 => {}
-                    Bytecode::Dstore_3 => {}
-                    Bytecode::Dsub => {}
-                    Bytecode::Dup => {}
-                    Bytecode::Dup_x2 => {}
-                    Bytecode::Dup2 => {}
-                    Bytecode::Dup2_x1 => {}
-                    Bytecode::Dup2_x2 => {}
-                    Bytecode::F2d => {}
-                    Bytecode::F2i => {}
-                    Bytecode::F2l => {}
-                    Bytecode::Fadd => {}
-                    Bytecode::Faload => {}
-                    Bytecode::Fastore => {}
-                    Bytecode::Fcmpg => {}
-                    Bytecode::Fcmpl => {}
-                    Bytecode::Fconst_0 => {}
-                    Bytecode::Fconst_1 => {}
-                    Bytecode::Fconst_2 => {}
-                    Bytecode::Fdiv => {}
-                    Bytecode::Fload(_) => {}
-                    Bytecode::Fload_0 => {}
-                    Bytecode::Fload_1 => {}
-                    Bytecode::Fload_2 => {}
-                    Bytecode::Fload_3 => {}
-                    Bytecode::Fmul => {}
-                    Bytecode::Fneg => {}
-                    Bytecode::Frem => {}
-                    Bytecode::Freturn => {}
-                    Bytecode::Fstore(_) => {}
-                    Bytecode::Fstore_0 => {}
-                    Bytecode::Fstore_1 => {}
-                    Bytecode::Fstore_2 => {}
-                    Bytecode::Fstore_3 => {}
-                    Bytecode::Fsub => {}
-                    Bytecode::Getfield(_) => {}
-                    Bytecode::Getstatic(_) => {}
-                    Bytecode::Goto(_) => {}
-                    Bytecode::Goto_w(_) => {}
-                    Bytecode::I2b => {}
-                    Bytecode::I2c => {}
-                    Bytecode::I2d => {}
-                    Bytecode::I2f => {}
-                    Bytecode::I2l => {}
-                    Bytecode::I2s => {}
-                    Bytecode::Iadd => {}
-                    Bytecode::Iaload => {}
-                    Bytecode::Iand => {}
-                    Bytecode::Iastore => {}
-                    Bytecode::Iconst_m1 => {}
-                    Bytecode::Iconst_0 => {}
-                    Bytecode::Iconst_1 => {}
-                    Bytecode::Iconst_2 => {}
-                    Bytecode::Iconst_3 => {}
-                    Bytecode::Iconst_4 => {}
-                    Bytecode::Iconst_5 => {}
-                    Bytecode::Idiv => {}
-                    Bytecode::If_acmpeq(_) => {}
-                    Bytecode::If_acmpne(_) => {}
-                    Bytecode::If_icmpeq(_) => {}
-                    Bytecode::If_icmpne(_) => {}
-                    Bytecode::If_icmplt(_) => {}
-                    Bytecode::If_icmpge(_) => {}
-                    Bytecode::If_icmpgt(_) => {}
-                    Bytecode::If_icmple(_) => {}
-                    Bytecode::Ifeq(_) => {}
-                    Bytecode::Ifne(_) => {}
-                    Bytecode::Iflt(_) => {}
-                    Bytecode::Ifge(_) => {}
-                    Bytecode::Ifgt(_) => {}
-                    Bytecode::Ifle(_) => {}
-                    Bytecode::Ifnonnull(_) => {}
-                    Bytecode::Ifnull(_) => {}
-                    Bytecode::Iinc(_, _) => {}
-                    Bytecode::Iload(_) => {}
-                    Bytecode::Iload_0 => {}
-                    Bytecode::Iload_1 => {}
-                    Bytecode::Iload_2 => {}
-                    Bytecode::Iload_3 => {}
-                    Bytecode::Imul => {}
-                    Bytecode::Ineg => {}
-                    Bytecode::Instanceof(_) => {}
-                    Bytecode::Invokedynamic(_) => {}
-                    Bytecode::Invokeinterface(_, _) => {}
-                    Bytecode::Invokespecial(_) => {}
-                    Bytecode::Invokestatic(_) => {}
-                    Bytecode::Invokevirtual(_) => {}
-                    Bytecode::Ior => {}
-                    Bytecode::Irem => {}
-                    Bytecode::Ireturn => {}
-                    Bytecode::Ishl => {}
-                    Bytecode::Ishr => {}
-                    Bytecode::Istore(_) => {}
-                    Bytecode::Istore_0 => {}
-                    Bytecode::Istore_1 => {}
-                    Bytecode::Istore_2 => {}
-                    Bytecode::Istore_3 => {}
-                    Bytecode::Isub => {}
-                    Bytecode::Iushr => {}
-                    Bytecode::Ixor => {}
-                    Bytecode::Jsr(_) => {}
-                    Bytecode::Jsr_w(_) => {}
-                    Bytecode::L2d => {}
-                    Bytecode::L2f => {}
-                    Bytecode::L2i => {}
-                    Bytecode::Ladd => {}
-                    Bytecode::Laload => {}
-                    Bytecode::Land => {}
-                    Bytecode::Lastore => {}
-                    Bytecode::Lcmp => {}
-                    Bytecode::Lconst_0 => {}
-                    Bytecode::Lconst_1 => {}
-                    Bytecode::Ldc(_) => {}
-                    Bytecode::Ldc_w(_) => {}
-                    Bytecode::Ldc2_w(_) => {}
-                    Bytecode::Ldiv => {}
-                    Bytecode::Lload(_) => {}
-                    Bytecode::Lload_0 => {}
-                    Bytecode::Lload_1 => {}
-                    Bytecode::Lload_2 => {}
-                    Bytecode::Lload_3 => {}
-                    Bytecode::Lmul => {}
-                    Bytecode::Lneg => {}
-                    Bytecode::Lookupswitch(_, _) => {}
-                    Bytecode::Lor => {}
-                    Bytecode::Lrem => {}
-                    Bytecode::Lreturn => {}
-                    Bytecode::Lshl => {}
-                    Bytecode::Lshr => {}
-                    Bytecode::Lstore => {}
-                    Bytecode::Lstore_0 => {}
-                    Bytecode::Lstore_1 => {}
-                    Bytecode::Lstore_2 => {}
-                    Bytecode::Lstore_3 => {}
-                    Bytecode::Lsub => {}
-                    Bytecode::Lushr => {}
-                    Bytecode::Lxor => {}
-                    Bytecode::Monitorenter => {}
-                    Bytecode::Monitorexit => {}
-                    Bytecode::Multianewarray => {}
-                    Bytecode::New => {}
-                    Bytecode::Newarray => {}
-                    Bytecode::Nop => {}
-                    Bytecode::Pop => {}
-                    Bytecode::Pop2 => {}
-                    Bytecode::Putfield => {}
-                    Bytecode::Putstatic => {}
-                    Bytecode::Ret => {}
-                    Bytecode::Return => {}
-                    Bytecode::Saload => {}
-                    Bytecode::Sastore => {}
-                    Bytecode::Sipush => {}
-                    Bytecode::Swap => {}
-                    Bytecode::Tableswitch => {}
-                    Bytecode::Wide => {}
-                }
-            }
-
-            b
-        }
     }
 }

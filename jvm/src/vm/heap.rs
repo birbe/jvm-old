@@ -13,7 +13,7 @@ use crate::vm::linker::loader::are_classpaths_siblings;
 pub struct Heap {
     pub strings: HashMap<String, usize>,
 
-    pub objects: Vec<ObjectInfo>,
+    pub objects: Vec<Object>,
     available_object_ids: Vec<usize>
 }
 
@@ -64,7 +64,7 @@ impl Heap {
     }
 
     pub fn create_object(&mut self, class: Rc<Class>) -> usize {
-        let info = ObjectInfo {
+        let info = Object {
             ptr: Self::allocate_class(class.clone()),
             class: class.clone()
         };
@@ -260,7 +260,7 @@ impl InternArrayType {
     }
 }
 
-pub struct ObjectInfo {
+pub struct Object {
     pub(crate) class: Rc<Class>,
     ptr: *mut u8
 }

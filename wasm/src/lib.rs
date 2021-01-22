@@ -308,12 +308,6 @@ impl From<NoneError> for CompilationError {
     }
 }
 
-macro_rules! push_op {
-    ( $stack:ident, $instr:expr ) => {
-        stack.last_mut().unwrap().push($instr);
-    }
-}
-
 impl<'classloader> WasmEmitter<'classloader> {
     pub fn new(class_loader: &'classloader ClassLoader, main_export: &str) -> Self {
         let mut module = Module::with_config(ModuleConfig::new());
@@ -627,7 +621,7 @@ impl<'classloader> WasmEmitter<'classloader> {
     fn bytecode_as_ir(&mut self, code: &Code, method: &Method, class: &Class) {
         let mut bytes = Cursor::new(code.code.clone());
 
-        while bytes.position() <
+        // while bytes.position() <
     }
 
     fn compile_bytecode(&mut self, code: &Code, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Result<(), CompilationError> {
@@ -655,30 +649,18 @@ impl<'classloader> WasmEmitter<'classloader> {
         
         let mut body = builder.func_body();
 
-        let mut i_stack: Vec<Vec<Instr>> = Vec::new();
-
-        i_stack.push(
-            Vec::new()
-        );
-
         while bytes.position() < len as u64 {
             let opcode = bytes.read_u8().unwrap();
 
             match opcode {
                 0x1 => { //aconst_null
-                    push_op!(i_stack, Instr::Const {
-                        value: Value::I32(self.memory.null as i32)
-                    });
+                    body.i32_const(self.memory.null as i32);
                 },
                 0x2..=0x8 => { //iconst_<n-1>
-                    push_op!(i_stack, Instr::Const {
-                        value: Value::I32(opcode as i32 - 0x3)
-                    });
+                    body.i32_const(opcode as i32 - 0x3);
                 },
                 0x10 => {
-                    push_op!(i_stack, Instr::Const {
-                        value: Value::I32(bytes.read_u8()? as i32)
-                    });
+                    body.i32_const(bytes.read_u8()? as i32);
                 },
                 0x12 => { //ldc
                     let index = bytes.read_u8()?;
