@@ -1,10 +1,10 @@
 # JVM-Rust
 
-![badge](https://img.shields.io/badge/version-0.1.0-f39f37)
+![badge](https://img.shields.io/badge/version-0.1.0-f39f37) ![Rust](https://github.com/Birbe/jvm/workflows/Rust/badge.svg)
 
 ___
 
-A pure rust implementation of the JVM 7 spec, with the main goals being to be able to eventually
+A pure Rust implementation of the JVM 7 spec, with the main goals being to be able to eventually:
 
 - Run the unmodified OpenJDK 7 Java source
 - Run in a WASM environment
