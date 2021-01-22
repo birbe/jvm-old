@@ -1,14 +1,21 @@
 # JVM-Rust
+
+![badge](https://img.shields.io/badge/version-0.1.0-f39f37)
+
 ___
 
-This is a JVM written in pure Rust with the goals of being able to be compiled
-to WASM, and eventually run the full OpenJDK properly in the browser
-in order to run Java applets/applications.
+A pure rust implementation of the JVM 7 spec, with the main goals being to be able to eventually
 
-There are currently two modes of execution, but they are both highly incomplete.
+- Run the unmodified OpenJDK 7 Java source
+- Run in a WASM environment
+
+There are currently two modes of execution, but they are both highly unstable/incomplete.
 
 - Interpreted mode
 - Bytecode -> WASM compilation
+
+In terms of code simplicity, the interpreter wins, but will end up being much slower
+than JITed code.
 
 ## Roadmap
 
@@ -72,7 +79,7 @@ while mut_thread.get_stack_count() > 0 {
 
 #### Control flow
 
-Java bytecode uses arbitrary goto/jump instructions, which does not directly
+Java bytecode uses arbitrary gotoun/jump instructions, which does not directly
 map to WASM. WASM uses a static "block" format, where you define sets of instructions,
 of which you can then run commands to go to. Control flow will thus take
 more time to get working in the WASM compiler than in the interpreted mode,
