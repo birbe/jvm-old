@@ -19,7 +19,7 @@ than JITed code.
 
 ## Roadmap
 
-Classloader status
+#### Classloader status
 
 - [x] Deserialize Java 7 classes
 - [ ] Type-checking of the bytecode (!)
@@ -27,17 +27,17 @@ Classloader status
 
 Currently, none of the code is type-checked, so only input Java that you trust.
 
-Interpreter roadmap
+#### Interpreter roadmap
 
 - [x] Get basic bytecode running in interpreted mode
 - [x] Get heap allocation and object creation working
 - [ ] Basic stop-the-world garbage collection
 - [ ] Get the OpenJDK 7 source to load and run.
   
-WASM-Compiler roadmap
+#### WASM roadmap
 
 - [x] Get basic bytecode compiled to WASM
-- [ ] Control flow*
+- [ ] Control flow *
 - [ ] Get heap allocation working
 - [ ] Basic stop-the-world garbage collection
 
