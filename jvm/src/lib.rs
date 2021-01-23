@@ -1,5 +1,4 @@
 #![feature(seek_convenience)]
-#![feature(arbitrary_enum_discriminant)]
 
 pub mod vm;
 
