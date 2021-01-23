@@ -60,7 +60,7 @@ impl ControlFlow {
                 Bytecode::Lookupswitch(_, _) => {}
                 Bytecode::Swap => {}
                 Bytecode::Tableswitch => {}
-                Bytecode::Wide => {}
+                Bytecode::Wide(_) => {}
                 _ => {}
             }
         }

@@ -10,7 +10,7 @@ use crypto::digest::Digest;
 use jvm::vm::class::attribute::AttributeItem::Signature;
 use std::error::Error;
 use jvm::vm::class::attribute::{AttributeItem, Code};
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom};
 use jvm::vm::class::constant::Constant;
 use std::collections::HashMap;
 use byteorder::{ReadBytesExt, BigEndian, LittleEndian, ByteOrder};
@@ -22,6 +22,7 @@ use walrus::ir::Instr::Binop;
 use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value};
 use std::io;
 use std::option::NoneError;
+use jvm::vm::vm::bytecode::Bytecode;
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
@@ -506,11 +507,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     if *local.0 > max_local_index { max_local_index = *local.0; }
                 }
 
-                let params_length = if method.access_flags & 0x8 == 0 { //not static
-                    method_descriptor.parameters.len() + 1
-                } else {
-                    method_descriptor.parameters.len()
-                };
+                let params_length = pre_params.len();
 
                 let max_parameter_index = max(params_length as isize - 1, 0);
 
@@ -526,7 +523,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                 for index in 0..local_variables_not_params {
                     let offset = params_length+index;
 
-                    java_locals.insert(offset, self.module.locals.add(bytecode_locals.get(&offset).unwrap().clone()));
+                    java_locals.insert(offset, self.module.locals.add(bytecode_locals.get(&offset).expect(
+                        &format!("{} {} {} {:?}", method.name, index, class.this_class, bytecode_locals)
+                    ).clone()));
                 }
 
                 match self.compile_bytecode(code, method, class, java_locals) {
@@ -548,6 +547,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
         while bytes.position() < len as u64 {
             let opcode = bytes.read_u8().unwrap();
+            println!("Reader {}, Opcode {}", bytes.position()-1, opcode);
 
             match opcode {
                 0x15 => { //iload
@@ -580,7 +580,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
                     jvm_locals.insert(index as usize, ValType::I32);
                 },
-                0x1e..=0x21 => { //iload_<n>
+                0x1e..=0x21 => { //lload_<n>
                     let index = (opcode as u32) - 0x1e;
 
                     jvm_locals.insert(index as usize, ValType::I64);
@@ -611,14 +611,22 @@ impl<'classloader> WasmEmitter<'classloader> {
                 0x4b..=0x4e => { //astore_<n>
                     jvm_locals.insert(opcode as usize - 0x4b, ValType::I32);
                 },
-                _ => {}
+                _ => {
+                    bytes.seek(
+                    SeekFrom::Current(Bytecode::size_of(
+                        Bytecode::from_bytes(
+                            bytes.position() as usize - 1,
+                            &bytes.get_ref()[bytes.position() as usize-1..bytes.get_ref().len()]
+                        ).unwrap()
+                    ) as i64)
+                ); }
             }
         }
 
         jvm_locals
     }
 
-    fn bytecode_as_ir(&mut self, code: &Code, method: &Method, class: &Class) {
+    fn bytecode_intermediate(&mut self, code: &Code, method: &Method, class: &Class) {
         let mut bytes = Cursor::new(code.code.clone());
 
         // while bytes.position() <
