@@ -12,7 +12,7 @@ A pure Rust implementation of the JVM 7 spec, with the main goals being to be ab
 There are currently two modes of execution, but they are both highly unstable/incomplete.
 
 - Interpreted mode
-- Bytecode -> WASM compilation
+- Bytecode 🠖 WASM compilation
 
 In terms of code simplicity, the interpreter wins, but will end up being much slower
 than JITed code.
@@ -92,9 +92,8 @@ Mode: i (interpreted) OR wasm (compile to wasm and execute with Wasmtime)
 
 Java bytecode uses arbitrary gotoun/jump instructions, which does not directly
 map to WASM. WASM uses a static "block" format, where you define sets of instructions,
-of which you can then run commands to go to. Control flow will thus take
-more time to get working in the WASM compiler than in the interpreted mode,
-but it is technically possible.
+of which you can then run commands to go to. Meaning, control flow will take
+more time to get working in the WASM compiler than in the interpreted mode.
 
 #### JIT/Interpreted mode
 
