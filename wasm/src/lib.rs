@@ -19,10 +19,11 @@ use jvm::vm::linker::loader::ClassLoader;
 use std::cmp::max;
 use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId, FunctionKind, ExportItem, ImportKind, Memory, InstrSeqBuilder};
 use walrus::ir::Instr::Binop;
-use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value};
+use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value, InstrSeqId, InstrSeqType};
 use std::io;
 use std::option::NoneError;
 use jvm::vm::vm::bytecode::Bytecode;
+use crate::ir::{ControlFlow, Intermediate2, IndexedBytecode};
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
@@ -294,7 +295,8 @@ pub enum CompilationError {
     InvalidBytecode,
     EOF,
     NoneError,
-    MethodNotFound
+    MethodNotFound,
+    InvalidIntermediate
 }
 
 impl From<io::Error> for CompilationError {
@@ -528,10 +530,42 @@ impl<'classloader> WasmEmitter<'classloader> {
                     ).clone()));
                 }
 
-                match self.compile_bytecode(code, method, class, java_locals) {
-                    Err(c) => panic!(format!("Failed to compile code for {}\n{:?}", formatted, c)),
-                    Ok(_) => {}
+                let intermediate = self.bytecode_intermediate(
+                    code, method, class
+                );
+
+                let func_id = self.method_function_map.get(&formatted)?.unwrap_normal().0;
+
+                let mut builder = match &mut self.module.funcs.get_mut(func_id).kind {
+                    FunctionKind::Import(_) => unreachable!(),
+                    FunctionKind::Local(local) => local.builder_mut(),
+                    FunctionKind::Uninitialized(_) => unreachable!(),
                 };
+
+                let stubs = Self::generate_block_stubs(
+                    &mut builder.func_body(),
+                    &intermediate
+                ).unwrap();
+
+                let mut index_map = HashMap::new();
+
+                stubs.iter().for_each(|(bytecode_index, i2, block_id, builder)| {
+                    index_map.insert(*bytecode_index, *block_id);
+                });
+
+                stubs.iter().for_each(|(bytecode_index, i2, block_id, builder)| {
+                    let instructions = match i2 {
+                        Intermediate2::Intermediate1(_) => unreachable!(),
+                        Intermediate2::Instructions(v) => v,
+                        Intermediate2::Block(_) => unreachable!()
+                    };
+                    self.compile_bytecode(*builder, instructions, index_map, method, class, java_locals);
+                });
+
+                // match self.compile_bytecode(code, method, class, java_locals) {
+                //     Err(c) => panic!(format!("Failed to compile code for {}\n{:?}", formatted, c)),
+                //     Ok(_) => {}
+                // };
             }
         }
 
@@ -547,7 +581,6 @@ impl<'classloader> WasmEmitter<'classloader> {
 
         while bytes.position() < len as u64 {
             let opcode = bytes.read_u8().unwrap();
-            println!("Reader {}, Opcode {}", bytes.position()-1, opcode);
 
             match opcode {
                 0x15 => { //iload
@@ -614,7 +647,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                 _ => {
                     bytes.seek(
                     SeekFrom::Current(Bytecode::size_of(
-                        Bytecode::from_bytes(
+                        &Bytecode::from_bytes(
                             bytes.position() as usize - 1,
                             &bytes.get_ref()[bytes.position() as usize-1..bytes.get_ref().len()]
                         ).unwrap()
@@ -626,26 +659,48 @@ impl<'classloader> WasmEmitter<'classloader> {
         jvm_locals
     }
 
-    fn bytecode_intermediate(&mut self, code: &Code, method: &Method, class: &Class) {
-        let mut bytes = Cursor::new(code.code.clone());
-
-        // while bytes.position() <
+    fn bytecode_intermediate(&mut self, code: &Code, method: &Method, class: &Class) -> Intermediate2 {
+        ControlFlow::convert(&code.code[..]).unwrap()
     }
 
-    fn compile_bytecode(&mut self, code: &Code, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Result<(), CompilationError> {
+    fn generate_block_stubs<'a, 'b>(builder: &mut InstrSeqBuilder, intermediates: &'a Intermediate2) -> Result<Vec<(usize, &'a Intermediate2, InstrSeqId, &'b mut InstrSeqBuilder<'b>)>, CompilationError> {
+        let mut vec: Vec<(usize, &Intermediate2, InstrSeqId, &mut InstrSeqBuilder)> = Vec::new();
+
+        match intermediates {
+            Intermediate2::Intermediate1(_) => return Result::Err(CompilationError::InvalidIntermediate),
+            Intermediate2::Instructions(instr) => {
+                let first = instr.first();
+                if first.is_some() {
+                    builder.block(InstrSeqType::Simple(Option::None), |builder| {
+                        vec.push(
+                            (first.unwrap().1, intermediates, builder.id(), builder)
+                        )
+                    });
+                } else {
+                    panic!("shouldn't happen");
+                }
+            }
+            Intermediate2::Block(i2) => {
+                builder.block(InstrSeqType::Simple(Option::None), |builder| {
+                    i2.iter().for_each(|e| {
+                        vec.extend(
+                            Self::generate_block_stubs(
+                                builder, e
+                            ).unwrap()
+                        )
+                    });
+                });
+            }
+        }
+
+        Result::Ok(vec)
+    }
+
+    fn compile_bytecode(&mut self, builder: &mut InstrSeqBuilder, code: &Vec<IndexedBytecode>, block_map: HashMap<usize, InstrSeqId>, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Result<(), CompilationError> {
         let formatted = format_method_name(class, method);
         let method_descriptor = MethodDescriptor::parse(&method.descriptor);
 
         let func_id = self.method_function_map.get(&formatted).ok_or(CompilationError::MethodNotFound)?.unwrap_normal().0;
-
-        let mut builder = match &mut self.module.funcs.get_mut(func_id).kind {
-            FunctionKind::Import(_) => unreachable!(),
-            FunctionKind::Local(local) => local.builder_mut(),
-            FunctionKind::Uninitialized(_) => unreachable!(),
-        };
-
-        let mut bytes = Cursor::new(code.code.clone());
-        let len = code.code.len();
 
         let mut locals_max = 0; //The max index used to the local map in the bytecode
 
@@ -657,27 +712,27 @@ impl<'classloader> WasmEmitter<'classloader> {
         
         let mut body = builder.func_body();
 
-        while bytes.position() < len as u64 {
-            let opcode = bytes.read_u8().unwrap();
+        for ib in code.iter() {
 
-            match opcode {
-                0x1 => { //aconst_null
-                    body.i32_const(self.memory.null as i32);
+            let bytecode = &ib.0;
+            let bytecode_index = *&ib.1;
+
+            match bytecode {
+                Bytecode::Aconst_null => { //aconst_null
+                    builder.i32_const(self.memory.null as i32);
                 },
-                0x2..=0x8 => { //iconst_<n-1>
-                    body.i32_const(opcode as i32 - 0x3);
+                Bytecode::Iconst_n_m1(i) => {
+                    builder.i32_const(*i as i32);
                 },
-                0x10 => {
-                    body.i32_const(bytes.read_u8()? as i32);
+                Bytecode::Bipush(b) => {
+                    builder.i32_const(*b as i32);
                 },
-                0x12 => { //ldc
-                    let index = bytes.read_u8()?;
-                    
-                    match class.constant_pool.get(index as usize).unwrap() {
-                        Constant::Integer(int) => { body.i32_const(*int); },
-                        Constant::Float(float) => { body.f32_const(*float); },
-                        Constant::Long(long) => { body.i64_const(*long); },
-                        Constant::Double(double) => { body.f64_const(*double as f64); },
+                Bytecode::Ldc(index) => { //ldc
+                    match class.constant_pool.get(*index as usize).unwrap() {
+                        Constant::Integer(int) => { builder.i32_const(*int); },
+                        Constant::Float(float) => { builder.f32_const(*float); },
+                        Constant::Long(long) => { builder.i64_const(*long); },
+                        Constant::Double(double) => { builder.f64_const(*double as f64); },
                         Constant::String(string) => {
                             let utf8 = class.constant_pool.resolve_utf8(*string).unwrap();
 
@@ -687,32 +742,44 @@ impl<'classloader> WasmEmitter<'classloader> {
                                 *self.memory.strings.get(utf8).unwrap()
                             };
 
-                            body.i32_const(self.memory.resources.get(resource_index).unwrap().offset as i32);
+                            builder.i32_const(self.memory.resources.get(resource_index).unwrap().offset as i32);
                         }
                         _ => {}
                     };
                 },
-                0x11 => { //sipush
-                    body.i32_const(bytes.read_u16::<BigEndian>()? as i32);
+                Bytecode::Sipush(short) => { //sipush
+                    builder.i32_const(*short as i32);
                 },
-                0x15..=0x19 => { //iload, lload, fload, dload, aload
-                    body.local_get(xload_n!(bytes.read_u8()? as usize, method_descriptor, java_locals));
+                Bytecode::Iload(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
                 },
-                0x1a..=0x1d => { //iload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x1a, method_descriptor, java_locals));
+                Bytecode::Lload(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
                 },
-                0x1e..=0x21 => { //lload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x1e, method_descriptor, java_locals));
+                Bytecode::Fload(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
                 },
-                0x22..=0x25 => { //fload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x22, method_descriptor, java_locals));
+                Bytecode::Dload(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
                 },
-                0x2a..=0x2d => { //aload_<n>
-                    body.local_get(xload_n!(opcode as usize - 0x2a, method_descriptor, java_locals));
+                Bytecode::Aload(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
                 },
-                0x32 => { //aaload
-                    body.binop(BinaryOp::I32Add);
-                    body.load(
+                Bytecode::Iload_n(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
+                },
+                Bytecode::Lload_n(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
+                },
+                Bytecode::Fload_n(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
+                },
+                Bytecode::Aload_n(index) => {
+                    builder.local_get(xload_n!(*index as usize, method_descriptor, java_locals));
+                },
+                Bytecode::Aaload => { //aaload
+                    builder.binop(BinaryOp::I32Add);
+                    builder.load(
                         self.memory.memory_id,
                         LoadKind::I32 {
                             atomic: false
@@ -723,16 +790,16 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     );
                 },
-                0x33 => { //baload
-                    body.i32_const(1);
-                    body.binop(BinaryOp::I32Add);
+                Bytecode::Baload => { //baload
+                    builder.i32_const(1);
+                    builder.binop(BinaryOp::I32Add);
 
-                    body.binop(BinaryOp::I32Add); //Increment by one
+                    builder.binop(BinaryOp::I32Add); //Increment by one
 
                     //Arrayref is now at the top of the stack
-                    body.binop(BinaryOp::I32Add);
+                    builder.binop(BinaryOp::I32Add);
                     //The proper offset to the element is now at the top
-                    body.store(
+                    builder.store(
                         self.memory.memory_id,
                         StoreKind::I32 {
                             atomic: true
@@ -743,23 +810,20 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     ); //Load the byte/bool
                 },
-                0x3a => { //astore
-                    let local = &(bytes.read_u8().unwrap() as usize);
-                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
+                Bytecode::Astore(local) => { //astore
+                    builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
                 },
-                0x3b..=0x3e => { //istore_<n>
-                    let local = &(opcode as usize - 0x3b);
-                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
+                Bytecode::Istore_n(local) => { //istore_<n>
+                    builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
                 },
-                0x4b..=0x4e => { //astore_<n>
-                    let local = &(opcode as usize - 0x4b);
-                    body.local_set(java_locals.get(local).ok_or(CompilationError::UnknownLocal(*local))?.clone());
+                Bytecode::Astore_n(local) => { //astore_<n>
+                    builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
                 },
-                0x53 => { //aastore
-                    body.local_set(helper.get(ValType::I32, 0));
-                    body.binop(BinaryOp::I32Add);
-                    body.local_get(helper.get(ValType::I32, 0));
-                    body.store(
+                Bytecode::Aastore => { //aastore
+                    builder.local_set(helper.get(ValType::I32, 0));
+                    builder.binop(BinaryOp::I32Add);
+                    builder.local_get(helper.get(ValType::I32, 0));
+                    builder.store(
                         self.memory.memory_id,
                         StoreKind::I32 {
                             atomic: true
@@ -770,19 +834,19 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     );
                 },
-                0x54 => { //bastore
-                    body.local_set(helper.get(ValType::I32, 0));
+                Bytecode::Bastore => { //bastore
+                    builder.local_set(helper.get(ValType::I32, 0));
 
                     //arrayref is on top
 
                     //TODO: null check
 
-                    body.i32_const(1); //Increment by one because the length is first
-                    body.binop(BinaryOp::I32Add); //index + 1
-                    body.binop(BinaryOp::I32Add); //(index + 1) + arrayref
+                    builder.i32_const(1); //Increment by one because the length is first
+                    builder.binop(BinaryOp::I32Add); //index + 1
+                    builder.binop(BinaryOp::I32Add); //(index + 1) + arrayref
 
-                    body.local_get(helper.get(ValType::I32, 0)); //Un-stash the value
-                    body.store(
+                    builder.local_get(helper.get(ValType::I32, 0)); //Un-stash the value
+                    builder.store(
                         self.memory.memory_id,
                         StoreKind::I32_8 {
                             atomic: false
@@ -793,10 +857,10 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     );
                 },
-                0x55 => { //castore
+                Bytecode::Castore => { //castore
                     //arrayref, index, value
 
-                    body.local_set(helper.get(ValType::I32, 0)) //stash the value
+                    builder.local_set(helper.get(ValType::I32, 0)) //stash the value
                         .i32_const(2)
                         .binop(BinaryOp::I32Mul) //Multiply by two as a char is two bytes
                         .i32_const(4)
@@ -813,49 +877,44 @@ impl<'classloader> WasmEmitter<'classloader> {
                             }
                         );
                 },
-                0xa2 => { //if_icmpge
-                    let branch_byte = bytes.read_u16::<BigEndian>()?;
+                Bytecode::If_icmpge(branch) => { //if_icmpge
+                    builder.binop(BinaryOp::I32GeS);
 
-                    body.binop(BinaryOp::I32GeS);
-                },
-                0xac => {
-                    body.return_();
-                }
-                0xb0 => {
-                    body.return_();
-                },
-                0xb1 => { //return (void)
-                    body.return_();
-                },
-                0xb5 => { //putfield
-                    let index = bytes.read_u16::<BigEndian>().unwrap();
+                    let index = (bytecode_index as isize) + (*branch as isize);
 
-                    if let Constant::FieldRef(class_index, nat_index) = class.constant_pool.get(index as usize).unwrap() {
+                    builder.br_if(
+                        *block_map.get(&(index as usize)).unwrap()
+                    );
+                },
+                Bytecode::Ireturn | Bytecode::Areturn | Bytecode::Return => {
+                    builder.return_();
+                },
+                Bytecode::Putfield(index) => {
+                    if let Constant::FieldRef(class_index, nat_index) = class.constant_pool.get(*index as usize).unwrap() {
                         let clazz = class.constant_pool.resolve_class_info(*class_index).unwrap();
                         let (name, descriptor) = class.constant_pool.resolve_name_and_type(*nat_index).unwrap();
 
                         let field_offset = class.field_map.get(name).unwrap().offset;
                         let fd = FieldDescriptor::parse(descriptor);
 
-                        body.local_set(
+                        builder.local_set(
                             helper.get(ValType::I32, 0)
                         ); //stash
 
-                        body.i32_const(field_offset as i32);
-                        body.i32_const(1);
+                        builder.i32_const(field_offset as i32);
+                        builder.i32_const(1);
 
-                        body.binop(BinaryOp::I32Add);
-                        body.binop(BinaryOp::I32Add);
+                        builder.binop(BinaryOp::I32Add);
+                        builder.binop(BinaryOp::I32Add);
 
-                        body.local_get(
+                        builder.local_get(
                             helper.get(ValType::I32, 0)
                         );
                     } else { panic!("Constant did not resolve to FieldRef!"); }
                 },
-                0xb7 => { //TODO: invokespecial
-                    let index = bytes.read_u16::<BigEndian>().unwrap();
+                Bytecode::Invokespecial(index) => { //TODO: invokespecial
 
-                    let method_ref = class.constant_pool.resolve_ref_info(index as usize).unwrap();
+                    let method_ref = class.constant_pool.resolve_ref_info(*index as usize).unwrap();
 
                     let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor);
 
@@ -887,18 +946,16 @@ impl<'classloader> WasmEmitter<'classloader> {
                         MethodFunctionType::NativeImport(id, _) => id
                     };
 
-                    body.call(*function_id);
+                    builder.call(*function_id);
                 },
-                0xb8 => { //TODO: invokestatic
-                    let index = bytes.read_u16::<BigEndian>().unwrap();
-
-                    let method_ref = class.constant_pool.resolve_ref_info(index as usize).unwrap();
+                Bytecode::Invokestatic(index) => { //TODO: invokestatic
+                    let method_ref = class.constant_pool.resolve_ref_info(*index as usize).unwrap();
                     let clazz = self.class_loader.get_class(&method_ref.class_name).unwrap();
 
                     let method = clazz.get_method(&method_ref.name, &method_ref.descriptor);
 
                     if AccessFlags::is_native(method.access_flags) {
-                        body.call(
+                        builder.call(
                             match self.method_function_map.get(&format_method_name(clazz.as_ref(), method.as_ref())).unwrap() {
                                 MethodFunctionType::Normal(_, _) => unreachable!(),
                                 MethodFunctionType::NativeImport(func, _) => *func
@@ -906,23 +963,22 @@ impl<'classloader> WasmEmitter<'classloader> {
                         );
                     }
                 },
-                0xbd => { //anewarray
-                    body.i32_const(1); //Size of the array takes up an I32
-                    body.binop(BinaryOp::I32Add);
-                    body.call(
+                Bytecode::Anewarray(index) => { //anewarray
+                    builder.i32_const(1); //Size of the array takes up an I32
+                    builder.binop(BinaryOp::I32Add);
+                    builder.call(
                         match self.method_function_map.get("allocate_to_heap").unwrap() {
                             MethodFunctionType::Normal(funcid, _) => funcid.clone(),
                             MethodFunctionType::NativeImport(_, _) => unreachable!()
                         }
                     );
                 },
-                0xbb => {
-                    let index = bytes.read_u16::<BigEndian>().ok()?;
-                    let classpath = class.constant_pool.resolve_class_info(index)?;
+                Bytecode::New(index) => {
+                    let classpath = class.constant_pool.resolve_class_info(*index)?;
                     let clazz = self.class_loader.get_class(classpath)?;
                     let heap_classpath_offset = *self.class_resource_map.get(classpath)?;
 
-                    body
+                    builder
                         .i32_const(clazz.full_heap_size as i32 + 4) //Size of the class, plus the offset to the classpath
                         .call(self.method_function_map.get("allocate_to_heap")?.unwrap_normal().0)
                         .local_set(helper.get(ValType::I32, 0)) //Store it
@@ -947,10 +1003,8 @@ impl<'classloader> WasmEmitter<'classloader> {
                         .local_get(helper.get(ValType::I32, 0)); //Get the pointer (offset) to the reference again
 
                 },
-                0xbc => { //newarray
-                    let atype = bytes.read_u8().ok()?;
-
-                    let size = match atype {
+                Bytecode::Newarray(atype) => { //newarray
+                    let size = match *atype {
                         4 => 1,
                         5 => 2,
                         6 => 4,
@@ -964,12 +1018,12 @@ impl<'classloader> WasmEmitter<'classloader> {
                         )
                     };
 
-                    body.i32_const(size) //The size of the data type
+                    builder.i32_const(size) //The size of the data type
                         .binop(BinaryOp::I32Mul) //Multiply it with the count which is on the stack
                         .call(self.method_function_map.get("allocate_to_heap")?.unwrap_normal().0); //Allocate
                 },
-                0xbe => { //arraylength
-                    body.load(
+                Bytecode::Arraylength => { //arraylength
+                    builder.load(
                         self.memory.memory_id,
                         LoadKind::I32 {
                             atomic: true
@@ -980,7 +1034,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                         }
                     ); //the pointer to the array will be the length itself
                 },
-                _ => unimplemented!("Unimplemented opcode {}\nClass: {}\nMethod: {}\nPos: {}", opcode, class.this_class, method.name, bytes.position())
+                _ => unimplemented!("Unimplemented opcode {:?}\nClass: {}\nMethod: {}", bytecode, class.this_class, method.name)
             }
         }
 

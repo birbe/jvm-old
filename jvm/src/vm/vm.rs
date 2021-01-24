@@ -960,7 +960,7 @@ pub mod bytecode {
     use std::rc::Rc;
     use num_enum::IntoPrimitive;
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct LookupEntry {
         lookup_match: i32,
         offset: i32
@@ -977,25 +977,19 @@ pub mod bytecode {
     // }
 
     #[allow(non_camel_case_types)]
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     #[repr(u8)]
     pub enum Bytecode {
         Aaload, //0x32
         Aastore, //0x53
         Aconst_null, //0x1
         Aload(u8), //0x19
-        Aload_0, //0x2a
-        Aload_1, //0x2b
-        Aload_2, //0x2c
-        Aload_3, //0x2d
+        Aload_n(u8), //0x2a - 0x2d
         Anewarray(u16), //0xbd
         Areturn, //0xb0
         Arraylength, //0xbe
         Astore(u8), //0x3a
-        Astore_0, //0x4b
-        Astore_1, //0x4c
-        Astore_2, //0x4d
-        Astore_3, //0x4e
+        Astore_n(u8), //0x4b - 0x4e
         Athrow, //0xbf
         Baload, //0x33
         Bastore, //0x54
@@ -1011,23 +1005,16 @@ pub mod bytecode {
         Dastore, //0x52
         Dcmpg, //0x98
         Dcmpl, //0x97
-        Dconst_0, //0xe
-        Dconst_1, //0xf
+        Dconst_n(u8), //0xe - 0xf
         Ddiv, //0x6f
         Dload(u8), //0x18
-        Dload_0, //0x26
-        Dload_1, //0x27
-        Dload_2, //0x28
-        Dload_3, //0x29
+        Dload_n(u8), //0x26 - 0x29
         Dmul, //0x6b
         Dneg, //0x77
         Drem, //0x73
         Dreturn, //0xaf
         Dstore(u8), //0x39
-        Dstore_0, //0x47
-        Dstore_1, //0x48
-        Dstore_2, //0x49
-        Dstore_3, //0x4a
+        Dstore_n(u8), //0x47 - 0x4a
         Dsub, //0x67
         Dup, //0x59
         Dup_x2, //0x5b
@@ -1042,24 +1029,16 @@ pub mod bytecode {
         Fastore, //0x51
         Fcmpg, //0x96
         Fcmpl, //0x95
-        Fconst_0, //0xb
-        Fconst_1, //0xc
-        Fconst_2, //0xd
+        Fconst_n(u8), //0xb - 0xd
         Fdiv, //0x6e
         Fload(u8), //0x17
-        Fload_0, //0x22
-        Fload_1, //0x23
-        Fload_2, //0x24
-        Fload_3, //0x25
+        Fload_n(u8), //0x22 - 0x25
         Fmul, //0x6a
         Fneg, //0x76
         Frem, //0x72
         Freturn, //0xae
         Fstore(u8), //0x38
-        Fstore_0, //0x43
-        Fstore_1, //0x44
-        Fstore_2, //0x45
-        Fstore_3, //0x46
+        Fstore_n(u8), //0x43 - 0x46
         Fsub, //0x66
         Getfield(u16), //0xb4
         Getstatic(u16), //0xb2
@@ -1075,13 +1054,7 @@ pub mod bytecode {
         Iaload, //0x2e
         Iand, //0x7e
         Iastore, //0x4f
-        Iconst_m1, //0x2
-        Iconst_0, //0x3
-        Iconst_1, //0x4
-        Iconst_2, //0x5
-        Iconst_3, //0x6
-        Iconst_4, //0x7
-        Iconst_5, //0x8
+        Iconst_n_m1(i8), //0x2 - 0x8 (minus 1)
         Idiv, //0x6c
         If_acmpeq(i16), //0xa5
         If_acmpne(i16), //0xa6
@@ -1101,10 +1074,7 @@ pub mod bytecode {
         Ifnull(i16), //0xc6
         Iinc(u8, i8), //0x84
         Iload(u8), //0x15
-        Iload_0, //0x1a
-        Iload_1, //0x1b
-        Iload_2, //0x1c
-        Iload_3, //0x1d
+        Iload_n(u8), //0x1a - 0x1d
         Imul, //0x68
         Ineg, //0x74
         Instanceof(u16), //0xc1
@@ -1119,10 +1089,7 @@ pub mod bytecode {
         Ishl, //0x78
         Ishr, //0x7a
         Istore(u8), //0x36
-        Istore_0, //0x3b
-        Istore_1, //0x3c
-        Istore_2, //0x3d
-        Istore_3, //0x3e
+        Istore_n(u8), //0x3b - 0x3e
         Isub, //0x64
         Iushr, //0x7c
         Ixor, //0x82
@@ -1136,17 +1103,13 @@ pub mod bytecode {
         Land, //0x7f
         Lastore, //0x50
         Lcmp, //0x94
-        Lconst_0, //0x9
-        Lconst_1, //0xa
+        Lconst_n(u8), //0x9 - 0xa
         Ldc(u8), //0x12
         Ldc_w(u16), //0x13
         Ldc2_w(u16), //0x14
         Ldiv, //0x6d
         Lload(u8), //0x16
-        Lload_0, //0x1e
-        Lload_1, //0x1f
-        Lload_2, //0x20
-        Lload_3, //0x21
+        Lload_n(u8), //0x1e - 0x21
         Lmul, //0x69
         Lneg, //0x75
         Lookupswitch(i32, Vec<LookupEntry>), //0xab
@@ -1157,35 +1120,32 @@ pub mod bytecode {
         Lshl, //0x79
         Lshr, //0x7b
         Lstore, //0x37
-        Lstore_0, //0x3f
-        Lstore_1, //0x40
-        Lstore_2, //0x41
-        Lstore_3, //0x42
+        Lstore_n(u8), //0x3f - 0x42
         Lsub, //0x65
         Lushr, //0x7d
         Lxor, //0x83
         Monitorenter, //0xc2
         Monitorexit, //0xc3
         Multianewarray, //0xc5
-        New, //0xbb
-        Newarray, //0xbc
+        New(u16), //0xbb
+        Newarray(u8), //0xbc
         Nop, //0x0
         Pop, //0x57
         Pop2, //0x58
-        Putfield, //0xb5
+        Putfield(u16), //0xb5
         Putstatic, //0xb3
         Ret, //0xa9
         Return, //0xb1
         Saload, //0x35
         Sastore, //0x56
-        Sipush, //0x11
+        Sipush(i16), //0x11
         Swap, //0x5f
         Tableswitch, //0xaa
         Wide(Vec<u8>) //0xc4
     }
 
     impl Bytecode {
-        pub fn size_of(s: Self) -> usize {
+        pub fn size_of(s: &Self) -> usize {
             match s {
                 Bytecode::Aload(_) => 2,
                 Bytecode::Anewarray(_) => 3,
@@ -1217,6 +1177,7 @@ pub mod bytecode {
                 Bytecode::Ifnonnull(_) => 3,
                 Bytecode::Ifnull(_) => 3,
                 Bytecode::Iinc(_, _) => 3,
+                Bytecode::Newarray(_) => 2,
                 Bytecode::Iload(_) => 2,
                 Bytecode::Instanceof(_) => 3,
                 Bytecode::Invokedynamic(_) => 5,
@@ -1231,6 +1192,7 @@ pub mod bytecode {
                 Bytecode::Ldc_w(_) => 3,
                 Bytecode::Ldc2_w(_) => 3,
                 Bytecode::Lload(_) => 2,
+                Bytecode::New(_) => 3,
                 Bytecode::Lookupswitch(_, vec) => 4 + (vec.len() * 8),
                 Bytecode::Tableswitch => unimplemented!(),
                 Bytecode::Wide(_) => unimplemented!(),
@@ -1241,24 +1203,18 @@ pub mod bytecode {
         pub fn from_bytes(pos: usize, bytes: &[u8]) -> Option<Self> {
             let mut cursor = Cursor::new(bytes);
             let opcode = cursor.read_u8().ok()?;
-            println!("l'opcode {}", opcode);
+
             Option::Some(match opcode {
                 0x32 => Self::Aaload,
                 0x53 => Self::Aastore,
                 0x1 => Self::Aconst_null,
                 0x19 => Self::Aload(cursor.read_u8().ok()?),
-                0x2a => Self::Aload_0,
-                0x2b => Self::Aload_1,
-                0x2c => Self::Aload_2,
-                0x2d => Self::Aload_3,
+                0x2a..=0x2d => Self::Aload_n(opcode - 0x2a),
                 0xbd => Self::Anewarray(cursor.read_u16::<BigEndian>().ok()?),
                 0xb0 => Self::Areturn,
                 0xbe => Self::Arraylength,
                 0x3a => Self::Astore(cursor.read_u8().ok()?),
-                0x4b => Self::Astore_0,
-                0x4c => Self::Astore_1,
-                0x4d => Self::Astore_2,
-                0x4e => Self::Astore_3,
+                0x4b..=0x4e => Self::Astore_n(opcode - 0x4b),
                 0xbf => Self::Athrow,
                 0x33 => Self::Baload,
                 0x54 => Self::Bastore,
@@ -1274,23 +1230,16 @@ pub mod bytecode {
                 0x52 => Self::Dastore,
                 0x98 => Self::Dcmpg,
                 0x97 => Self::Dcmpl,
-                0xe => Self::Dconst_0,
-                0xf => Self::Dconst_1,
+                0xe..=0xf => Self::Dconst_n(opcode - 0x3),
                 0x6f => Self::Ddiv,
                 0x18 => Self::Dload(cursor.read_u8().ok()?),
-                0x26 => Self::Dload_0,
-                0x27 => Self::Dload_1,
-                0x28 => Self::Dload_2,
-                0x29 => Self::Dload_3,
+                0x26..=0x29 => Self::Dload_n(opcode - 0x26),
                 0x6b => Self::Dmul,
                 0x77 => Self::Dneg,
                 0x73 => Self::Drem,
                 0xaf => Self::Dreturn,
                 0x39 => Self::Dstore(cursor.read_u8().ok()?),
-                0x47 => Self::Dstore_0,
-                0x48 => Self::Dstore_1,
-                0x49 => Self::Dstore_2,
-                0x4a => Self::Dstore_3,
+                0x47..=0x4a => Self::Dstore_n(opcode - 0x47),
                 0x67 => Self::Dsub,
                 0x59 => Self::Dup,
                 0x5b => Self::Dup_x2,
@@ -1305,24 +1254,16 @@ pub mod bytecode {
                 0x51 => Self::Fastore,
                 0x96 => Self::Fcmpg,
                 0x95 => Self::Fcmpl,
-                0xb => Self::Fconst_0,
-                0xc => Self::Fconst_1,
-                0xd => Self::Fconst_2,
+                0xb..=0xd => Self::Fconst_n(opcode - 0xb),
                 0x6e => Self::Fdiv,
                 0x17 => Self::Fload(cursor.read_u8().ok()?),
-                0x22 => Self::Fload_0,
-                0x23 => Self::Fload_1,
-                0x24 => Self::Fload_2,
-                0x25 => Self::Fload_3,
+                0x22..=0x25 => Self::Fload_n(opcode - 0x22),
                 0x6a => Self::Fmul,
                 0x76 => Self::Fneg,
                 0x72 => Self::Frem,
                 0xae => Self::Freturn,
                 0x38 => Self::Fstore(cursor.read_u8().ok()?),
-                0x43 => Self::Fstore_0,
-                0x44 => Self::Fstore_1,
-                0x45 => Self::Fstore_2,
-                0x46 => Self::Fstore_3,
+                0x43..=0x46 => Self::Fstore_n(opcode - 0x43),
                 0x66 => Self::Fsub,
                 0xb4 => Self::Getfield(cursor.read_u16::<BigEndian>().ok()?),
                 0xb2 => Self::Getstatic(cursor.read_u16::<BigEndian>().ok()?),
@@ -1338,13 +1279,7 @@ pub mod bytecode {
                 0x2e => Self::Iaload,
                 0x7e => Self::Iand,
                 0x4f => Self::Iastore,
-                0x2 => Self::Iconst_m1,
-                0x3 => Self::Iconst_0,
-                0x4 => Self::Iconst_1,
-                0x5 => Self::Iconst_2,
-                0x6 => Self::Iconst_3,
-                0x7 => Self::Iconst_4,
-                0x8 => Self::Iconst_5,
+                0x2..=0x8 => Self::Iconst_n_m1(((opcode as i16) - 0x3) as i8),
                 0x6c => Self::Idiv,
                 0xa5 => Self::If_acmpeq(cursor.read_i16::<BigEndian>().ok()?),
                 0xa6 => Self::If_acmpne(cursor.read_i16::<BigEndian>().ok()?),
@@ -1364,10 +1299,7 @@ pub mod bytecode {
                 0xc6 => Self::Ifnull(cursor.read_i16::<BigEndian>().ok()?),
                 0x84 => Self::Iinc(cursor.read_u8().ok()?, cursor.read_i8().ok()?),
                 0x15 => Self::Iload(cursor.read_u8().ok()?),
-                0x1a => Self::Iload_0,
-                0x1b => Self::Iload_1,
-                0x1c => Self::Iload_2,
-                0x1d => Self::Iload_3,
+                0x1a..=0x1d => Self::Iload_n(opcode - 0x1a),
                 0x68 => Self::Imul,
                 0x74 => Self::Ineg,
                 0xc1 => Self::Instanceof(cursor.read_u16::<BigEndian>().ok()?),
@@ -1382,10 +1314,7 @@ pub mod bytecode {
                 0x78 => Self::Ishl,
                 0x7a => Self::Ishr,
                 0x36 => Self::Istore(cursor.read_u8().ok()?),
-                0x3b => Self::Istore_0,
-                0x3c => Self::Istore_1,
-                0x3d => Self::Istore_2,
-                0x3e => Self::Istore_3,
+                0x3b..=0x3e => Self::Istore_n(opcode - 0x3b),
                 0x64 => Self::Isub,
                 0x7c => Self::Iushr,
                 0x82 => Self::Ixor,
@@ -1399,17 +1328,13 @@ pub mod bytecode {
                 0x7f => Self::Land,
                 0x50 => Self::Lastore,
                 0x94 => Self::Lcmp,
-                0x9 => Self::Lconst_0,
-                0xa => Self::Lconst_1,
+                0x9..=0xa => Self::Lconst_n(opcode - 0x9),
                 0x12 => Self::Ldc(cursor.read_u8().ok()?),
                 0x13 => Self::Ldc_w(cursor.read_u16::<BigEndian>().ok()?),
                 0x14 => Self::Ldc2_w(cursor.read_u16::<BigEndian>().ok()?),
                 0x6d => Self::Ldiv,
                 0x16 => Self::Lload(cursor.read_u8().ok()?),
-                0x1e => Self::Lload_0,
-                0x1f => Self::Lload_1,
-                0x20 => Self::Lload_2,
-                0x21 => Self::Lload_3,
+                0x1e..=0x21 => Self::Lload_n(opcode - 0x1e),
                 0x69 => Self::Lmul,
                 0x75 => Self::Lneg,
                 0xab => Self::Lookupswitch(cursor.read_i32::<BigEndian>().ok()?, {
@@ -1433,28 +1358,25 @@ pub mod bytecode {
                 0x79 => Self::Lshl,
                 0x7b => Self::Lshr,
                 0x37 => Self::Lstore,
-                0x3f => Self::Lstore_0,
-                0x40 => Self::Lstore_1,
-                0x41 => Self::Lstore_2,
-                0x42 => Self::Lstore_3,
+                0x3f..=0x42 => Self::Lstore_n(opcode - 0x3f),
                 0x65 => Self::Lsub,
                 0x7d => Self::Lushr,
                 0x83 => Self::Lxor,
                 0xc2 => Self::Monitorenter,
                 0xc3 => Self::Monitorexit,
                 0xc5 => Self::Multianewarray,
-                0xbb => Self::New,
-                0xbc => Self::Newarray,
+                0xbb => Self::New(cursor.read_u16::<BigEndian>().ok()?),
+                0xbc => Self::Newarray(cursor.read_u8().ok()?),
                 0x0 => Self::Nop,
                 0x57 => Self::Pop,
                 0x58 => Self::Pop2,
-                0xb5 => Self::Putfield,
+                0xb5 => Self::Putfield(cursor.read_u16::<BigEndian>().ok()?),
                 0xb3 => Self::Putstatic,
                 0xa9 => Self::Ret,
                 0xb1 => Self::Return,
                 0x35 => Self::Saload,
                 0x56 => Self::Sastore,
-                0x11 => Self::Sipush,
+                0x11 => Self::Sipush(cursor.read_i16::<BigEndian>().ok()?),
                 0x5f => Self::Swap,
                 0xaa => Self::Tableswitch,
                 0xcf => Self::Wide(Vec::new()),

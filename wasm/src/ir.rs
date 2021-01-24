@@ -1,37 +1,38 @@
 use walrus::ir::Instr;
 use jvm::vm::vm::bytecode::Bytecode;
 use std::collections::HashMap;
+use std::io::{Cursor, Seek, SeekFrom};
 
-type Intermediate1 = (Bytecode, bool);
+pub type IndexedBytecode = (Bytecode, usize);
+type Intermediate1 = (IndexedBytecode, bool);
 
+#[derive(Debug)]
 pub enum Intermediate2 {
     Intermediate1(Vec<Intermediate1>),
-    Instructions(Vec<Bytecode>),
+    Instructions(Vec<IndexedBytecode>),
     Block(Vec<Intermediate2>)
 }
 
 pub struct ControlFlow {
-    pub sourcemap: HashMap<usize, usize>,
-    pub bytecode: Vec<Bytecode>,
-
-    pub pass_1: Vec<Intermediate1>,
-    pub pass_2: Vec<Intermediate2>
+    pub source_bytecode_to_byte: HashMap<usize, usize>,
+    pub source_byte_to_bytecode: HashMap<usize, usize>,
+    pub bytecode: Vec<IndexedBytecode>
 }
 
 impl ControlFlow {
 
     //The first pass flags each location in the bytecode that requires a block
-    fn first_pass(&mut self) {
-        self.pass_1 = self.bytecode.iter().map(|b| {
+    fn first_pass(&mut self) -> Vec<Intermediate1> {
+        let mut pass_1: Vec<Intermediate1> = self.bytecode.iter().map(|b| {
             (b.clone(), false)
         }).collect();
 
         for index in 0..self.bytecode.len() {
             let instr = self.bytecode.get(index).unwrap();
 
-            let byte_index = *self.sourcemap.get(&index).unwrap();
+            let byte_index = *self.source_bytecode_to_byte.get(&index).unwrap();
 
-            match instr {
+            match &instr.0 {
                 Bytecode::Goto(offset) |
                 Bytecode::If_acmpeq(offset) |
                 Bytecode::If_acmpne(offset) |
@@ -49,8 +50,9 @@ impl ControlFlow {
                 Bytecode::Ifle(offset) |
                 Bytecode::Ifnonnull(offset) |
                 Bytecode::Ifnull(offset) => {
-                    let index = (byte_index as isize) + (*offset as isize);
-                    let entry: &mut Intermediate1 = self.pass_1.get_mut(index as usize).unwrap();
+                    let i = ((byte_index as isize) + (*offset as isize)) as usize;
+                    let index = *self.source_byte_to_bytecode.get(&i).unwrap();
+                    let entry: &mut Intermediate1 = pass_1.get_mut(index).unwrap();
                     entry.1 = true;
                 },
 
@@ -64,9 +66,11 @@ impl ControlFlow {
                 _ => {}
             }
         }
+
+        pass_1
     }
 
-    fn second_pass(i2: &mut Intermediate2) -> Intermediate2 {
+    fn second_pass(i2: Intermediate2) -> Intermediate2 {
         match i2 {
             Intermediate2::Intermediate1(i1) => {
                 let mut bytecodes = Vec::new();
@@ -75,34 +79,76 @@ impl ControlFlow {
                 for index in 0..i1.len() {
                     let entry = i1.get(index).unwrap();
                     if entry.1 { //Make a block, starting from here
-                        let block: Vec<Intermediate1> = (index..i1.len()).map(|i| {
+                        let mut block: Vec<Intermediate1> = Vec::new();
+                        block.push(
+                            (
+                                entry.0.clone(), false
+                            )
+                        );
+
+                        let following: Vec<Intermediate1> = (index+1..i1.len()).map(|i| {
                             i1.get(i).unwrap().clone()
                         }).collect();
+
+                        block.extend(following);
 
                         return if bytecodes.len() > 0 {
                             Intermediate2::Block(
                                 vec![
                                     Intermediate2::Instructions(bytecodes),
-                                    Intermediate2::Intermediate1(block)
+                                    Self::second_pass(Intermediate2::Intermediate1(block))
                                 ]
                             )
                         } else {
-                            Intermediate2::Intermediate1(block)
+                            Self::second_pass(Intermediate2::Intermediate1(block))
                         }
                     } else {
                         bytecodes.push(entry.0.clone());
                     }
                 }
+
+                Intermediate2::Instructions(bytecodes)
             },
-            Intermediate2::Instructions(_) => {}, //End case, no more blocks to add
-            Intermediate2::Block(block) => {
-                block.iter_mut().for_each(|e| {
-                    *e = Self::second_pass(e);
-                });
+            Intermediate2::Instructions(i) => Intermediate2::Instructions(i), //End case, no more blocks to add
+            Intermediate2::Block(mut block) => {
+                let mut new = Vec::new();
+                for _ in 0..block.len() {
+                    new.push(
+                        Self::second_pass(block.remove(0))
+                    );
+                }
+                Intermediate2::Block(new)
             }
         }
+    }
 
-        Intermediate2::Intermediate1(Vec::new())
+    pub fn convert(bytecode: &[u8]) -> Option<Intermediate2> {
+        let mut flow = Self {
+            source_bytecode_to_byte: HashMap::new(),
+            source_byte_to_bytecode: HashMap::new(),
+            bytecode: Vec::new()
+        };
+
+        let mut cursor = Cursor::new(bytecode);
+
+        while (cursor.position() as usize) < bytecode.len() {
+            let byte = Bytecode::from_bytes(cursor.position() as usize, &bytecode[cursor.position() as usize..bytecode.len()])?;
+            let length = Bytecode::size_of(&byte);
+
+            flow.source_bytecode_to_byte.insert(flow.bytecode.len(), cursor.position() as usize);
+            flow.source_byte_to_bytecode.insert(cursor.position() as usize, flow.bytecode.len());
+
+            flow.bytecode.push((byte, cursor.position() as usize));
+
+            cursor.seek(SeekFrom::Current(
+                length as i64
+            )).ok()?;
+        }
+
+        let i1 = flow.first_pass();
+
+        let mut i2 = Intermediate2::Intermediate1(i1);
+        Option::Some(Self::second_pass(i2))
     }
 
 }
