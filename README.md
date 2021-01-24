@@ -95,10 +95,18 @@ map to WASM. WASM uses a static "block" format, where you define sets of instruc
 of which you can then run commands to go to. Meaning, control flow will take
 more time to get working in the WASM compiler than in the interpreted mode.
 
+#### Classloaders
+
+Due to the (current!) lack of actual support for dynamic linking within WASM,
+user-defined classloaders will not work. It might technically be possible
+to support dynamic classloading without dynamic linking, but it would have massive
+overhead as it would hypothetically require generating a new WASM
+module for every class, and trying to have them all function together dynamically
+through JavaScript, but this would be a lot of work.
+
 #### JIT/Interpreted mode
 
 Due to the current lack of stable support for dynamic linking in WASM,
 it's not possible to have a mixed execution mode like you can find in the Oracle JVM,
 which is able to gather statistics on hotspots within bytecode, and JIT them to native code
-to have them run faster. Technically the only benefit of this would potentially be somewhat
-smaller memory usage, but this overhead shouldn't matter.
+to have them run faster. As JITed code should essentially always run faster, however, this feature is probably useless.
