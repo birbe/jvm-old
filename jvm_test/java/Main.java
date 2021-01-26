@@ -10,8 +10,10 @@ public class Main {
 //
 //    public static native void print_long(long l);
 
-    public static void main(String[] args) {
-        int i = 1898121;
+    public static void main(int i) {
+        if(i != 0) {
+
+        }
     }
 
 }

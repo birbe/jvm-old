@@ -18,12 +18,15 @@ use jvm::vm::vm::VirtualMachine;
 use jvm::vm::linker::loader::ClassLoader;
 use std::cmp::max;
 use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId, FunctionKind, ExportItem, ImportKind, Memory, InstrSeqBuilder};
-use walrus::ir::Instr::Binop;
+use walrus::ir::*;
 use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value, InstrSeqId, InstrSeqType};
 use std::io;
 use std::option::NoneError;
 use jvm::vm::vm::bytecode::Bytecode;
 use crate::ir::{ControlFlow, Intermediate2, IndexedBytecode};
+use std::cell::{RefCell, RefMut};
+use std::borrow::{Borrow, BorrowMut};
+use std::ops::DerefMut;
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
@@ -280,8 +283,8 @@ macro_rules! xload_n {
 }
 
 pub struct WasmEmitter<'classloader> {
-    pub(crate) module: Module,
-    pub(crate) memory: MemoryLayout,
+    pub(crate) module: RefCell<Module>,
+    pub(crate) memory: RefCell<MemoryLayout>,
     pub(crate) method_function_map: HashMap<String, MethodFunctionType>,
     pub(crate) class_loader: &'classloader ClassLoader,
 
@@ -327,8 +330,8 @@ impl<'classloader> WasmEmitter<'classloader> {
         );
 
         let mut emitter = WasmEmitter {
-            module,
-            memory: MemoryLayout::new(memory_id),
+            module: RefCell::new(module),
+            memory: RefCell::new(MemoryLayout::new(memory_id)),
             method_function_map: HashMap::new(),
             class_loader,
             class_resource_map: HashMap::new(),
@@ -336,67 +339,74 @@ impl<'classloader> WasmEmitter<'classloader> {
         };
 
         {
-            let requested_size = emitter.module.locals.add(ValType::I32);
+            let mut module = emitter.module.borrow_mut();
 
-            let mut heap_allocate = FunctionBuilder::new(&mut emitter.module.types, &[ValType::I32], &[ValType::I32]);
+            {
+                let requested_size = module.locals.add(ValType::I32);
 
-            let local = emitter.module.locals.add(ValType::I32);
+                let mut heap_allocate = FunctionBuilder::new(&mut module.types, &[ValType::I32], &[ValType::I32]);
 
-            heap_allocate.name(String::from("allocate_to_heap")).func_body()
-                .i32_const(emitter.memory.heap_size as i32)
-                .load(
-                    emitter.memory.memory_id,
-                    LoadKind::I32 {
-                        atomic: false
-                    },
-                    MemArg {
-                        align: 1,
-                        offset: 0
-                    }
-                )
-                .local_get(requested_size)
-                .binop(BinaryOp::I32Add) //Get the new heap size
-                .local_set(local) //Store it
-                .local_get(local) //Get it again
-                .i32_const(emitter.memory.heap_size as i32) //offset to where the heap size is located
-                .store(
-                    emitter.memory.memory_id,
-                    StoreKind::I32 {
-                        atomic: false
-                    },
-                    MemArg {
-                        align: 1,
-                        offset: 0
-                    }
-                ) //Update the heap size
-                .local_get(local); //Get the new heap size
+                let local = module.locals.add(ValType::I32);
 
-            let id = heap_allocate.finish(vec![requested_size], &mut emitter.module.funcs);
+                heap_allocate.name(String::from("allocate_to_heap")).func_body()
+                    .i32_const(emitter.memory.borrow().heap_size as i32)
+                    .load(
+                        emitter.memory.borrow().memory_id,
+                        LoadKind::I32 {
+                            atomic: false
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    )
+                    .local_get(requested_size)
+                    .binop(BinaryOp::I32Add) //Get the new heap size
+                    .local_set(local) //Store it
+                    .local_get(local) //Get it again
+                    .i32_const(emitter.memory.borrow().heap_size as i32) //offset to where the heap size is located
+                    .store(
+                        emitter.memory.borrow().memory_id,
+                        StoreKind::I32 {
+                            atomic: false
+                        },
+                        MemArg {
+                            align: 1,
+                            offset: 0
+                        }
+                    ) //Update the heap size
+                    .local_get(local); //Get the new heap size
 
-            emitter.method_function_map.insert(String::from("allocate_to_heap"), MethodFunctionType::Normal(id, vec![requested_size]));
-        }
+                let id = heap_allocate.finish(vec![requested_size], &mut module.funcs);
 
-        //TODO: make these do stuff again
+                emitter.method_function_map.insert(String::from("allocate_to_heap"), MethodFunctionType::Normal(id, vec![requested_size]));
+            }
 
-        {
-            let class = emitter.module.locals.add(ValType::I32);
+            //TODO: make these do stuff again
 
-            let mut heap_allocate = FunctionBuilder::new(&mut emitter.module.types, &[ValType::I32], &[ValType::I32]);
+            {
+                let class = module.locals.add(ValType::I32);
 
-            heap_allocate.name(String::from("heap_allocate")).func_body().local_get(class);
+                let mut heap_allocate = FunctionBuilder::new(&mut module.types, &[ValType::I32], &[ValType::I32]);
 
-            let id = heap_allocate.finish(vec![class], &mut emitter.module.funcs);
+                heap_allocate.name(String::from("heap_allocate")).func_body().local_get(class);
 
-            emitter.method_function_map.insert(String::from("allocate_class"), MethodFunctionType::Normal(id, vec![class]));
+                let id = heap_allocate.finish(vec![class], &mut module.funcs);
+
+                emitter.method_function_map.insert(String::from("allocate_class"), MethodFunctionType::Normal(id, vec![class]));
+            }
         }
 
         emitter
     }
 
     pub fn build(mut self) -> (Vec<u8>, SerializedMemory) {
-        (self.module.emit_wasm(), SerializedMemory {
-            data: self.memory.as_vec(),
-            strings: self.memory.strings
+        let data = self.memory.borrow().as_vec();
+        let strings = self.memory.into_inner().strings;
+
+        (self.module.borrow_mut().emit_wasm(), SerializedMemory {
+            data,
+            strings
         })
     }
 
@@ -414,6 +424,8 @@ impl<'classloader> WasmEmitter<'classloader> {
     }
 
     pub fn generate_stubs(&mut self, class: &Class) {
+        let mut module = self.module.borrow_mut();
+
         for (method_name, overloaded) in class.method_map.iter() {
             for (descriptor, method) in overloaded.iter() {
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor);
@@ -433,12 +445,12 @@ impl<'classloader> WasmEmitter<'classloader> {
                 };
 
                 if AccessFlags::is_native(method.access_flags) {
-                    let native_type = self.module.types.add(
+                    let native_type = module.types.add(
                         &params_vec[..],
                         &return_vec[..]
                     );
 
-                    let import = self.module.add_import_func(
+                    let import = module.add_import_func(
                         "jvm_native",
                         &formatted,
                         native_type
@@ -447,7 +459,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     self.method_function_map.insert(String::from(&formatted), MethodFunctionType::NativeImport(import.0, import.1));
                 } else {
                     let mut builder = FunctionBuilder::new(
-                        &mut self.module.types,
+                        &mut module.types,
                         &params_vec[..],
                         &return_vec[..]
                     );
@@ -456,11 +468,11 @@ impl<'classloader> WasmEmitter<'classloader> {
                         formatted
                     );
 
-                    let param_locals: Vec<LocalId> = params_vec.iter().map(|x| self.module.locals.add(*x)).collect();
+                    let param_locals: Vec<LocalId> = params_vec.iter().map(|x| module.locals.add(*x)).collect();
 
                     let id = builder.finish(
                         param_locals.clone(),
-                        &mut self.module.funcs
+                        &mut module.funcs
                     );
 
                     self.method_function_map.insert(
@@ -469,7 +481,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     );
 
                     if method.name == "main" {
-                        self.module.exports.add(
+                        module.exports.add(
                             "main",
                             ExportItem::Function(id)
                         );
@@ -520,12 +532,14 @@ impl<'classloader> WasmEmitter<'classloader> {
                         index,
                         pre_params.get(index).expect(&format!("{} {} {} {:?}", method.name, index, class.this_class, pre_params)).clone()
                     );
+
                 }
+                let mut module = self.module.borrow_mut();
 
                 for index in 0..local_variables_not_params {
                     let offset = params_length+index;
 
-                    java_locals.insert(offset, self.module.locals.add(bytecode_locals.get(&offset).expect(
+                    java_locals.insert(offset, module.locals.add(bytecode_locals.get(&offset).expect(
                         &format!("{} {} {} {:?}", method.name, index, class.this_class, bytecode_locals)
                     ).clone()));
                 }
@@ -534,9 +548,11 @@ impl<'classloader> WasmEmitter<'classloader> {
                     code, method, class
                 );
 
+                println!("Intermediate {:?}", intermediate);
+
                 let func_id = self.method_function_map.get(&formatted)?.unwrap_normal().0;
 
-                let mut builder = match &mut self.module.funcs.get_mut(func_id).kind {
+                let mut builder = match &mut module.funcs.get_mut(func_id).kind {
                     FunctionKind::Import(_) => unreachable!(),
                     FunctionKind::Local(local) => local.builder_mut(),
                     FunctionKind::Uninitialized(_) => unreachable!(),
@@ -544,22 +560,37 @@ impl<'classloader> WasmEmitter<'classloader> {
 
                 let stubs = Self::generate_block_stubs(
                     &mut builder.func_body(),
-                    &intermediate
+                    &intermediate,
+                    true
                 ).unwrap();
 
                 let mut index_map = HashMap::new();
 
-                stubs.iter().for_each(|(bytecode_index, i2, block_id, builder)| {
+                stubs.iter().for_each(|(bytecode_index, i2, block_id)| {
                     index_map.insert(*bytecode_index, *block_id);
                 });
 
-                stubs.iter().for_each(|(bytecode_index, i2, block_id, builder)| {
+                stubs.iter().for_each(|(bytecode_index, i2, block_id)| {
                     let instructions = match i2 {
                         Intermediate2::Intermediate1(_) => unreachable!(),
                         Intermediate2::Instructions(v) => v,
                         Intermediate2::Block(_) => unreachable!()
                     };
-                    self.compile_bytecode(*builder, instructions, index_map, method, class, java_locals);
+
+                    let instr;
+
+                    let locals = &mut module.locals;
+                    instr = self.compile_bytecode(locals, instructions, &index_map, method, class, &java_locals).unwrap();
+
+                    let mut builder = match &mut module.funcs.get_mut(func_id).kind {
+                        FunctionKind::Import(_) => unreachable!(),
+                        FunctionKind::Local(local) => local.builder_mut(),
+                        FunctionKind::Uninitialized(_) => unreachable!(),
+                    };
+
+                    instr.iter().for_each(|i| {
+                        builder.instr_seq(*block_id).instr(i.clone());
+                    });
                 });
 
                 // match self.compile_bytecode(code, method, class, java_locals) {
@@ -659,23 +690,33 @@ impl<'classloader> WasmEmitter<'classloader> {
         jvm_locals
     }
 
-    fn bytecode_intermediate(&mut self, code: &Code, method: &Method, class: &Class) -> Intermediate2 {
+    fn bytecode_intermediate(&self, code: &Code, method: &Method, class: &Class) -> Intermediate2 {
         ControlFlow::convert(&code.code[..]).unwrap()
     }
 
-    fn generate_block_stubs<'a, 'b>(builder: &mut InstrSeqBuilder, intermediates: &'a Intermediate2) -> Result<Vec<(usize, &'a Intermediate2, InstrSeqId, &'b mut InstrSeqBuilder<'b>)>, CompilationError> {
-        let mut vec: Vec<(usize, &Intermediate2, InstrSeqId, &mut InstrSeqBuilder)> = Vec::new();
+    fn generate_block_stubs<'intermediate>(builder: &mut InstrSeqBuilder, intermediates: &'intermediate Intermediate2, first: bool) -> Result<Vec<(usize, &'intermediate Intermediate2, InstrSeqId)>, CompilationError> {
+        let mut vec: Vec<(usize, &'intermediate Intermediate2, InstrSeqId)> = Vec::new();
+
+        if first {
+            if let Intermediate2::Block(v) = intermediates {
+                v.iter().for_each(|i| {
+                    vec.extend(
+                        Self::generate_block_stubs(builder, i, false).unwrap()
+                    );
+                });
+
+                return Result::Ok(vec);
+            }
+        }
 
         match intermediates {
             Intermediate2::Intermediate1(_) => return Result::Err(CompilationError::InvalidIntermediate),
             Intermediate2::Instructions(instr) => {
                 let first = instr.first();
                 if first.is_some() {
-                    builder.block(InstrSeqType::Simple(Option::None), |builder| {
-                        vec.push(
-                            (first.unwrap().1, intermediates, builder.id(), builder)
-                        )
-                    });
+                    vec.push(
+                        (first.unwrap().1, intermediates, builder.id())
+                    );
                 } else {
                     panic!("shouldn't happen");
                 }
@@ -685,7 +726,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     i2.iter().for_each(|e| {
                         vec.extend(
                             Self::generate_block_stubs(
-                                builder, e
+                                builder, e, false
                             ).unwrap()
                         )
                     });
@@ -696,21 +737,21 @@ impl<'classloader> WasmEmitter<'classloader> {
         Result::Ok(vec)
     }
 
-    fn compile_bytecode(&mut self, builder: &mut InstrSeqBuilder, code: &Vec<IndexedBytecode>, block_map: HashMap<usize, InstrSeqId>, method: &Method, class: &Class, java_locals: HashMap<usize, LocalId>) -> Result<(), CompilationError> {
+    fn compile_bytecode(&self, locals: &mut ModuleLocals, code: &Vec<IndexedBytecode>, block_map: &HashMap<usize, InstrSeqId>, method: &Method, class: &Class, java_locals: &HashMap<usize, LocalId>) -> Result<Vec<Instr>, CompilationError> {
         let formatted = format_method_name(class, method);
         let method_descriptor = MethodDescriptor::parse(&method.descriptor);
 
-        let func_id = self.method_function_map.get(&formatted).ok_or(CompilationError::MethodNotFound)?.unwrap_normal().0;
-
         let mut locals_max = 0; //The max index used to the local map in the bytecode
 
-        let mut helper = StackHelper::new(&mut self.module.locals);
+        let mut helper = StackHelper::new(locals);
 
         java_locals.iter().for_each(|i| {
             if *i.0 > locals_max { locals_max = *i.0; }
         });
-        
-        let mut body = builder.func_body();
+
+        let mut builder = ReallyLazyBuilderReplacement {
+            instrs: vec![]
+        };
 
         for ib in code.iter() {
 
@@ -719,7 +760,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
             match bytecode {
                 Bytecode::Aconst_null => { //aconst_null
-                    builder.i32_const(self.memory.null as i32);
+                    builder.i32_const(self.memory.borrow().null as i32);
                 },
                 Bytecode::Iconst_n_m1(i) => {
                     builder.i32_const(*i as i32);
@@ -736,13 +777,13 @@ impl<'classloader> WasmEmitter<'classloader> {
                         Constant::String(string) => {
                             let utf8 = class.constant_pool.resolve_utf8(*string).unwrap();
 
-                            let resource_index = if !self.memory.strings.contains_key(utf8) {
-                                self.memory.allocate_string(String::from(utf8), self.class_loader.get_class("java/lang/String").unwrap().as_ref())
+                            let resource_index = if !self.memory.borrow().strings.contains_key(utf8) {
+                                self.memory.borrow_mut().allocate_string(String::from(utf8), self.class_loader.get_class("java/lang/String").unwrap().as_ref())
                             } else {
-                                *self.memory.strings.get(utf8).unwrap()
+                                *self.memory.borrow().strings.get(utf8).unwrap()
                             };
 
-                            builder.i32_const(self.memory.resources.get(resource_index).unwrap().offset as i32);
+                            builder.i32_const(self.memory.borrow().resources.get(resource_index).unwrap().offset as i32);
                         }
                         _ => {}
                     };
@@ -780,7 +821,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                 Bytecode::Aaload => { //aaload
                     builder.binop(BinaryOp::I32Add);
                     builder.load(
-                        self.memory.memory_id,
+                        self.memory.borrow().memory_id,
                         LoadKind::I32 {
                             atomic: false
                         },
@@ -800,7 +841,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     builder.binop(BinaryOp::I32Add);
                     //The proper offset to the element is now at the top
                     builder.store(
-                        self.memory.memory_id,
+                        self.memory.borrow().memory_id,
                         StoreKind::I32 {
                             atomic: true
                         },
@@ -824,7 +865,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     builder.binop(BinaryOp::I32Add);
                     builder.local_get(helper.get(ValType::I32, 0));
                     builder.store(
-                        self.memory.memory_id,
+                        self.memory.borrow().memory_id,
                         StoreKind::I32 {
                             atomic: true
                         },
@@ -847,7 +888,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
                     builder.local_get(helper.get(ValType::I32, 0)); //Un-stash the value
                     builder.store(
-                        self.memory.memory_id,
+                        self.memory.borrow().memory_id,
                         StoreKind::I32_8 {
                             atomic: false
                         },
@@ -867,7 +908,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                         .binop(BinaryOp::I32Add) //(index * 2) + arrayref + 4
                         .local_get(helper.get(ValType::I32, 0))
                         .store(
-                            self.memory.memory_id,
+                            self.memory.borrow().memory_id,
                             StoreKind::I32_16 {
                                 atomic: false
                             },
@@ -991,7 +1032,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                         [pointer to where the classpath string is stored]
                          */
                         .store(
-                            self.memory.memory_id,
+                            self.memory.borrow().memory_id,
                             StoreKind::I32 {
                                 atomic: false
                             },
@@ -1001,6 +1042,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                             }
                         )
                         .local_get(helper.get(ValType::I32, 0)); //Get the pointer (offset) to the reference again
+
+                },
+                Bytecode::Ifeq(c) => {
 
                 },
                 Bytecode::Newarray(atype) => { //newarray
@@ -1024,7 +1068,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                 },
                 Bytecode::Arraylength => { //arraylength
                     builder.load(
-                        self.memory.memory_id,
+                        self.memory.borrow().memory_id,
                         LoadKind::I32 {
                             atomic: true
                         },
@@ -1038,6 +1082,148 @@ impl<'classloader> WasmEmitter<'classloader> {
             }
         }
 
-        Result::Ok(())
+        Result::Ok(builder.instrs)
+    }
+}
+
+struct ReallyLazyBuilderReplacement {
+    pub(crate) instrs: Vec<Instr>
+}
+
+impl ReallyLazyBuilderReplacement {
+    pub fn i32_const(&mut self, i: i32) -> &mut Self {
+        self.instrs.push(
+            Instr::Const(
+                Const {
+                    value: Value::I32(i)
+                }
+            )
+        );
+        self
+    }
+
+    pub fn i64_const(&mut self, i: i64) -> &mut Self {
+        self.instrs.push(
+            Instr::Const(
+                Const {
+                    value: Value::I64(i)
+                }
+            )
+        );
+        self
+    }
+
+    pub fn f32_const(&mut self, i: f32) -> &mut Self {
+        self.instrs.push(
+            Instr::Const(
+                Const {
+                    value: Value::F32(i)
+                }
+            )
+        );
+        self
+    }
+
+    pub fn f64_const(&mut self, i: f64) -> &mut Self {
+        self.instrs.push(
+            Instr::Const(
+                Const {
+                    value: Value::F64(i)
+                }
+            )
+        );
+        self
+    }
+
+    pub fn binop(&mut self, op: BinaryOp) -> &mut Self {
+        self.instrs.push(
+            Instr::Binop(
+                Binop {
+                    op
+                }
+            )
+        );
+        self
+    }
+
+    pub fn load(&mut self, mem: MemoryId, kind: LoadKind, arg: MemArg) -> &mut Self {
+        self.instrs.push(
+            Instr::Load(
+                Load {
+                    memory: mem,
+                    kind,
+                    arg
+                }
+            )
+        );
+        self
+    }
+
+    pub fn store(&mut self, mem: MemoryId, kind: StoreKind, arg: MemArg) -> &mut Self {
+        self.instrs.push(
+            Instr::Store(
+                Store {
+                    memory: mem,
+                    kind,
+                    arg
+                }
+            )
+        );
+        self
+    }
+
+    pub fn local_get(&mut self, local: LocalId) -> &mut Self {
+        self.instrs.push(
+            Instr::LocalGet(
+                LocalGet {
+                    local
+                }
+            )
+        );
+        self
+    }
+
+    pub fn local_set(&mut self, local: LocalId) -> &mut Self {
+        self.instrs.push(
+            Instr::LocalSet(
+                LocalSet {
+                    local
+                }
+            )
+        );
+        self
+    }
+
+    pub fn call(&mut self, func: FunctionId) -> &mut Self {
+        self.instrs.push(
+            Instr::Call(
+                Call {
+                    func
+                }
+            )
+        );
+        self
+    }
+    
+    pub fn return_(&mut self) -> &mut Self {
+        self.instrs.push(
+            Instr::Return(
+                Return {
+
+                }
+            )
+        );
+        self
+    }
+
+    pub fn br_if(&mut self, id: InstrSeqId) -> &mut Self {
+        self.instrs.push(
+            Instr::BrIf(
+                BrIf {
+                    block: id
+                }
+            )
+        );
+        self
     }
 }

@@ -96,11 +96,19 @@ impl ControlFlow {
                             Intermediate2::Block(
                                 vec![
                                     Intermediate2::Instructions(bytecodes),
-                                    Self::second_pass(Intermediate2::Intermediate1(block))
+                                    Self::second_pass(Intermediate2::Block(
+                                        vec![
+                                            Intermediate2::Intermediate1(block)
+                                        ]
+                                    ))
                                 ]
                             )
                         } else {
-                            Self::second_pass(Intermediate2::Intermediate1(block))
+                            Self::second_pass(Intermediate2::Block(
+                                vec![
+                                    Intermediate2::Intermediate1(block)
+                                ]
+                            ))
                         }
                     } else {
                         bytecodes.push(entry.0.clone());
