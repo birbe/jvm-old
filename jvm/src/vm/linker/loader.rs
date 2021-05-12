@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::vm::class::constant::{Constant};
-use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool, MethodDescriptor, ArrayType, MethodReturnType, Deserialize};
+use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, ConstantPool, MethodDescriptor, ArrayType, MethodReturnType, ClassError};
 use crate::vm::class::attribute::{Attribute};
 use std::collections::HashMap;
 use crate::vm::class::FieldDescriptor;
@@ -13,7 +13,9 @@ use std::ops::{Deref};
 use std::{fs, io};
 use crate::vm::vm::OperandType::ClassReference;
 use std::sync::RwLock;
+use crate::vm::vm::JvmError;
 
+#[derive(Debug)]
 pub enum ClassLoadState {
     Unloaded,
     Loading,
@@ -84,15 +86,15 @@ impl ClassLoader {
          }
     }
 
-    pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Rc<Class>), ClassLoadState> {
+    pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Rc<Class>), JvmError> {
         let maybe = self.class_map.get(classpath);
 
         if maybe.is_some() {
             match maybe.unwrap() {
                 ClassLoadState::Unloaded => {}
-                ClassLoadState::Loading => return Result::Err(ClassLoadState::Loading),
+                ClassLoadState::Loading => return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading)),
                 ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap())),
-                ClassLoadState::DeserializationError(e) => return Result::Err(ClassLoadState::DeserializationError(e.clone()))
+                ClassLoadState::DeserializationError(e) => return Result::Err(JvmError::ClassLoadError(ClassLoadState::DeserializationError(e.clone())))
             }
         }
 
@@ -135,7 +137,7 @@ impl ClassLoader {
                     self.load_and_link_class(class.constant_pool.resolve_class_info(*class_name).unwrap());
 
                     let (_, descriptor) = class.constant_pool.resolve_name_and_type(*name_and_type).unwrap();
-                    let fd = FieldDescriptor::parse(descriptor);
+                    let fd = FieldDescriptor::parse(descriptor)?;
 
                     self.load_link_field_descriptor(&fd);
                 }
@@ -143,7 +145,7 @@ impl ClassLoader {
                     self.load_and_link_class(class.constant_pool.resolve_class_info(*class_name).unwrap());
 
                     let (_, descriptor) = class.constant_pool.resolve_name_and_type(*name_and_type).unwrap();
-                    let md = MethodDescriptor::parse(descriptor);
+                    let md = MethodDescriptor::parse(descriptor)?;
 
                     match md.return_type {
                         MethodReturnType::Void => {}
@@ -207,8 +209,8 @@ impl ClassLoader {
         let superclass = self.get_class(&subclass.super_class).unwrap();
 
         if subclass.has_method(name, descriptor) {
-            let m1 = subclass.get_method(name, descriptor);
-            let m2 = superclass.get_method(name, descriptor);
+            let m1 = subclass.get_method(name, descriptor).ok()?;
+            let m2 = superclass.get_method(name, descriptor).ok()?;
 
             if {
                 (m2.access_flags & 0x1 == 0x1) || (m2.access_flags & 0x4 == 0x4)
@@ -243,7 +245,7 @@ impl ClassLoader {
 
         if superclass.has_method(name, descriptor) {
             Option::Some(
-                (superclass.clone(), superclass.get_method(name, descriptor))
+                (superclass.clone(), superclass.get_method(name, descriptor).ok()?)
             )
         } else {
             self.recurse_resolve_supermethod_special(superclass, name, descriptor)
@@ -269,6 +271,7 @@ pub fn are_classpaths_siblings(a: &str, b: &str) -> bool {
     }
 }
 
+#[derive(Debug)]
 pub enum DeserializationError {
     InvalidConstant(String),
     ClassFormatError,
@@ -319,7 +322,7 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
     constant_pool.push(Constant::Utf8(String::from(""))); //To get the index to 1
 
     for _ in 1..constant_pool_count {
-        let constant = Constant::from_bytes(&mut rdr, &constant_pool).ok_or(
+        let constant = Constant::from_bytes(&mut rdr, &constant_pool).map_err(|_|
             DeserializationError::InvalidConstant(String::from("Couldn't deserialize constant from constant pool"))
         )?;
 
@@ -372,7 +375,7 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
     let mut heap_size: usize = 0;
 
     for _ in 0..field_count {
-        let field = FieldInfo::from_bytes(&mut rdr, &constant_pool).ok_or(
+        let field = FieldInfo::from_bytes(&mut rdr, &constant_pool).map_err(|_|
             DeserializationError::InvalidPayload
         )?;
 
@@ -406,7 +409,7 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
     let mut method_map: HashMap<String, HashMap<String, Rc<Method>>> = HashMap::new();
 
     for _ in 0..method_count {
-        let m = Method::from_bytes(&mut rdr, &constant_pool).ok_or(
+        let m = Method::from_bytes(&mut rdr, &constant_pool).map_err(|_|
             DeserializationError::InvalidPayload
         )?;
 
