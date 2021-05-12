@@ -9,13 +9,13 @@ A pure Rust implementation of the JVM 7 spec, with the main goals being to be ab
 - Run the unmodified OpenJDK 7 Java source
 - Run in a WASM environment
 
-There are currently two modes of execution, but they are both highly unstable/incomplete.
+There are currently two modes of execution, but they are both highly incomplete.
 
 - Interpreted mode
 - Bytecode 🠖 WASM compilation
 
-In terms of code simplicity, the interpreter wins, but will end up being much slower
-than JITed code.
+The WASM compiler is still under a lot of work, but works with some extremely simple bytecode. Control flow is the
+most difficult part, and that part of the code probably needs to be cleaned up a lot.
 
 ## Roadmap
 
@@ -23,7 +23,7 @@ than JITed code.
 
 - [x] Deserialize Java 7 classes
 - [ ] Type-checking of the bytecode (!)
-- [ ] Cleanup the deserialization code (somewhat done)
+- [*] Cleanup the deserialization code
 
 Currently, none of the code is type-checked, so only input Java that you trust.
 
@@ -90,19 +90,17 @@ Mode: i (interpreted) OR wasm (compile to wasm and execute with Wasmtime)
 
 #### Control flow
 
-Java bytecode uses arbitrary gotoun/jump instructions, which does not directly
-map to WASM. WASM uses a static "block" format, where you define sets of instructions,
-of which you can then run commands to go to. Meaning, control flow will take
-more time to get working in the WASM compiler than in the interpreted mode.
+Java bytecode uses arbitrary goto/jump instructions, which does not directly
+map to WASM. WASM uses a static block format, where you define sets of instructions,
+of which you can then run commands to go to.
 
 #### Classloaders
 
 Due to the (current!) lack of actual support for dynamic linking within WASM,
-user-defined classloaders will not work. It might technically be possible
+user-defined classloaders will not work (within WASM compilation mode). It might technically be possible
 to support dynamic classloading without dynamic linking, but it would have massive
 overhead as it would hypothetically require generating a new WASM
-module for every class, and trying to have them all function together dynamically
-through JavaScript, but this would be a lot of work.
+module for every class, and having them all function together through JavaScript, which would be massively slow.
 
 #### JIT/Interpreted mode
 
