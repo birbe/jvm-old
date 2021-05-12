@@ -23,7 +23,7 @@ most difficult part, and that part of the code probably needs to be cleaned up a
 
 - [x] Deserialize Java 7 classes
 - [ ] Type-checking of the bytecode (!)
-- [*] Cleanup the deserialization code
+- [x] Cleanup the deserialization code
 
 Currently, none of the code is type-checked, so only input Java that you trust.
 
