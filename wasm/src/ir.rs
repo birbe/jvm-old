@@ -3,8 +3,9 @@ use jvm::vm::vm::bytecode::Bytecode;
 use std::collections::HashMap;
 use std::io::{Cursor, Seek, SeekFrom};
 
+pub type BlockFlag = bool;
 pub type IndexedBytecode = (Bytecode, usize);
-type Intermediate1 = (IndexedBytecode, bool);
+type Intermediate1 = (IndexedBytecode, BlockFlag);
 
 #[derive(Debug)]
 pub enum Intermediate2 {
@@ -131,29 +132,24 @@ impl ControlFlow {
     }
 
     pub fn convert(bytecode: &[u8]) -> Option<Intermediate2> {
-        let mut flow = Self {
+        let mut control_flow = Self {
             source_bytecode_to_byte: HashMap::new(),
             source_byte_to_bytecode: HashMap::new(),
             bytecode: Vec::new()
         };
 
-        let mut cursor = Cursor::new(bytecode);
+        let bytecodes = Bytecode::from_bytes_with_indices(0, &bytecode).ok()?;
 
-        while (cursor.position() as usize) < bytecode.len() {
-            let byte = Bytecode::from_bytes(cursor.position() as usize, &bytecode[cursor.position() as usize..bytecode.len()])?;
-            let length = Bytecode::size_of(&byte);
+        bytecodes.into_iter().for_each(|(bytecode, index)| {
+            let length = Bytecode::size_of(&bytecode);
 
-            flow.source_bytecode_to_byte.insert(flow.bytecode.len(), cursor.position() as usize);
-            flow.source_byte_to_bytecode.insert(cursor.position() as usize, flow.bytecode.len());
+            control_flow.source_bytecode_to_byte.insert(control_flow.bytecode.len(), index as usize);
+            control_flow.source_byte_to_bytecode.insert(index as usize, control_flow.bytecode.len());
 
-            flow.bytecode.push((byte, cursor.position() as usize));
+            control_flow.bytecode.push((bytecode, index as usize));
+        });
 
-            cursor.seek(SeekFrom::Current(
-                length as i64
-            )).ok()?;
-        }
-
-        let i1 = flow.first_pass();
+        let i1 = control_flow.first_pass();
 
         let mut i2 = Intermediate2::Intermediate1(i1);
         Option::Some(Self::second_pass(i2))

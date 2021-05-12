@@ -520,6 +520,7 @@ pub mod attribute {
     use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::constant::{Constant};
     use crate::vm::class::{ConstantPool, ParseError};
+    use crate::vm::vm::bytecode::Bytecode;
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     #[derive(Debug)]
@@ -570,6 +571,7 @@ pub mod attribute {
                                 for _ in 0..code_len {
                                     vec.push(rdr.read_u8()?)
                                 }
+
                                 vec
                             },
                             exception_table_length: {

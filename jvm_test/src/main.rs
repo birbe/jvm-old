@@ -99,8 +99,8 @@ fn main() {
             });
 
             let mut imports = vec![
-                print_string.into(),
-                // print_int.into()
+                // print_string.into(),
+                print_int.into()
             ];
 
             let instance = Instance::new(&store, &module, &imports).unwrap();
@@ -132,9 +132,9 @@ fn run_vm(path: PathBuf) {
 
         vm.start_time = SystemTime::now();
 
-        let thread = vm.spawn_thread("Main thread", "Main", "main", "([Ljava/lang/String;)V", vec![
+        let thread = vm.spawn_thread("Main", "Main", "main", "(I)V", vec![
             String::from("Hello world!")
-        ]);
+        ]).unwrap();
 
         let mut mut_thread = vm.threads.get_mut("Main").unwrap();
 

@@ -428,7 +428,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
         for (method_name, overloaded) in class.method_map.iter() {
             for (descriptor, method) in overloaded.iter() {
-                let method_descriptor = MethodDescriptor::parse(&method.descriptor);
+                let method_descriptor = MethodDescriptor::parse(&method.descriptor).unwrap();
                 let formatted = format_method_name(class, method);
 
                 let mut params_vec: Vec<ValType> = method_descriptor.parameters.iter().map(|p| field_descriptor_as_value_type(p)).collect();
@@ -548,7 +548,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     code, method, class
                 );
 
-                println!("Intermediate {:?}", intermediate);
+                // println!("Intermediate {:?}", intermediate);
 
                 let func_id = self.method_function_map.get(&formatted)?.unwrap_normal().0;
 
@@ -679,9 +679,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                     bytes.seek(
                     SeekFrom::Current(Bytecode::size_of(
                         &Bytecode::from_bytes(
-                            bytes.position() as usize - 1,
+                            bytes.position() - 1,
                             &bytes.get_ref()[bytes.position() as usize-1..bytes.get_ref().len()]
-                        ).unwrap()
+                        ).unwrap().pop().unwrap()
                     ) as i64)
                 ); }
             }
@@ -739,7 +739,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
     fn compile_bytecode(&self, locals: &mut ModuleLocals, code: &Vec<IndexedBytecode>, block_map: &HashMap<usize, InstrSeqId>, method: &Method, class: &Class, java_locals: &HashMap<usize, LocalId>) -> Result<Vec<Instr>, CompilationError> {
         let formatted = format_method_name(class, method);
-        let method_descriptor = MethodDescriptor::parse(&method.descriptor);
+        let method_descriptor = MethodDescriptor::parse(&method.descriptor).unwrap();
 
         let mut locals_max = 0; //The max index used to the local map in the bytecode
 
@@ -752,6 +752,8 @@ impl<'classloader> WasmEmitter<'classloader> {
         let mut builder = ReallyLazyBuilderReplacement {
             instrs: vec![]
         };
+
+        println!("Class {} {}\nJava {:?}", method.name, class.this_class, code);
 
         for ib in code.iter() {
 
@@ -855,6 +857,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
                 },
                 Bytecode::Istore_n(local) => { //istore_<n>
+                    println!("{:?}", java_locals);
                     builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
                 },
                 Bytecode::Astore_n(local) => { //astore_<n>
@@ -962,7 +965,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     // println!("{}", method_d);
 
                     let method_class = self.class_loader.get_class(&method_ref.class_name).unwrap();
-                    let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor);
+                    let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor).unwrap();
                     let to_invoke;
 
                     if {
@@ -993,7 +996,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     let method_ref = class.constant_pool.resolve_ref_info(*index as usize).unwrap();
                     let clazz = self.class_loader.get_class(&method_ref.class_name).unwrap();
 
-                    let method = clazz.get_method(&method_ref.name, &method_ref.descriptor);
+                    let method = clazz.get_method(&method_ref.name, &method_ref.descriptor).unwrap();
 
                     if AccessFlags::is_native(method.access_flags) {
                         builder.call(
@@ -1003,6 +1006,12 @@ impl<'classloader> WasmEmitter<'classloader> {
                             }
                         );
                     }
+                },
+                Bytecode::Imul => {
+                    builder.binop(BinaryOp::I32Mul);
+                },
+                Bytecode::Iadd => {
+                    builder.binop(BinaryOp::I32Add);
                 },
                 Bytecode::Anewarray(index) => { //anewarray
                     builder.i32_const(1); //Size of the array takes up an I32
@@ -1081,6 +1090,8 @@ impl<'classloader> WasmEmitter<'classloader> {
                 _ => unimplemented!("Unimplemented opcode {:?}\nClass: {}\nMethod: {}", bytecode, class.this_class, method.name)
             }
         }
+
+        println!("WASM {:?}\n\n", builder.instrs);
 
         Result::Ok(builder.instrs)
     }

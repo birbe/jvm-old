@@ -10,6 +10,6 @@ edition = "2018"
 
 jvm = { path = "../jvm" }
 wasm = { path = "../wasm" }
-wasmtime = "0.21.0"
+wasmtime = "0.26.0"
 clap = "2.33.3"
 byteorder = "1.4.2"
