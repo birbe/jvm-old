@@ -23,10 +23,11 @@ use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value, InstrSeqId
 use std::io;
 use std::option::NoneError;
 use jvm::vm::vm::bytecode::Bytecode;
-use crate::ir::{ControlFlow, Intermediate2, IndexedBytecode};
+use crate::ir::{ControlFlow, FoldedBytecode, IndexedBytecode};
 use std::cell::{RefCell, RefMut};
 use std::borrow::{Borrow, BorrowMut};
 use std::ops::DerefMut;
+use std::hint::unreachable_unchecked;
 
 fn format_method_name(class: &Class, method: &Method) -> String {
     format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
@@ -544,7 +545,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     ).clone()));
                 }
 
-                let intermediate = self.bytecode_intermediate(
+                let intermediate = self.fold_bytecode(
                     code, method, class
                 );
 
@@ -558,11 +559,12 @@ impl<'classloader> WasmEmitter<'classloader> {
                     FunctionKind::Uninitialized(_) => unreachable!(),
                 };
 
-                let stubs = Self::generate_block_stubs(
-                    &mut builder.func_body(),
-                    &intermediate,
-                    true
-                ).unwrap();
+                let stubs: Vec<(usize, &FoldedBytecode, InstrSeqId)> = intermediate.iter().map(|folded| {
+                    Self::generate_block_stubs(
+                        &mut builder.func_body(),
+                        &folded
+                    ).unwrap()
+                }).flatten().collect();
 
                 let mut index_map = HashMap::new();
 
@@ -570,17 +572,14 @@ impl<'classloader> WasmEmitter<'classloader> {
                     index_map.insert(*bytecode_index, *block_id);
                 });
 
-                stubs.iter().for_each(|(bytecode_index, i2, block_id)| {
-                    let instructions = match i2 {
-                        Intermediate2::Intermediate1(_) => unreachable!(),
-                        Intermediate2::Instructions(v) => v,
-                        Intermediate2::Block(_) => unreachable!()
+                stubs.into_iter().for_each(|(bytecode_index, folded_bytecode, block_id)| {
+                    let bytecode = match folded_bytecode {
+                        FoldedBytecode::Instructions(v) => v,
+                        _ => unreachable!("Stubs should only ever contain the necessary instructions.")
                     };
 
-                    let instr;
-
                     let locals = &mut module.locals;
-                    instr = self.compile_bytecode(locals, instructions, &index_map, method, class, &java_locals).unwrap();
+                    let instr = self.compile_bytecode(locals, bytecode, &index_map, method, class, &java_locals).unwrap();
 
                     let mut builder = match &mut module.funcs.get_mut(func_id).kind {
                         FunctionKind::Import(_) => unreachable!(),
@@ -589,14 +588,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                     };
 
                     instr.iter().for_each(|i| {
-                        builder.instr_seq(*block_id).instr(i.clone());
+                        builder.instr_seq(block_id).instr(i.clone());
                     });
                 });
-
-                // match self.compile_bytecode(code, method, class, java_locals) {
-                //     Err(c) => panic!(format!("Failed to compile code for {}\n{:?}", formatted, c)),
-                //     Ok(_) => {}
-                // };
             }
         }
 
@@ -605,132 +599,112 @@ impl<'classloader> WasmEmitter<'classloader> {
 
     ///Returns every local variable that is used and it's type
     fn analyze_locals(code: &Code, class: &Class) -> HashMap<usize, ValType> {
-        let mut bytes = Cursor::new(code.code.clone());
+        let bytecode = Bytecode::from_bytes(0, &code.code[..]).unwrap();
         let len = code.code.len();
 
         let mut jvm_locals = HashMap::new();
 
-        while bytes.position() < len as u64 {
-            let opcode = bytes.read_u8().unwrap();
-
-            match opcode {
-                0x15 => { //iload
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::I32);
+        bytecode.into_iter().for_each(|bytecode| {
+            let kv = match bytecode {
+                Bytecode::Iload(index) => { //iload
+                    (index as usize, ValType::I32)
                 },
-                0x16 => { //lload
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::I64);
+                Bytecode::Lload(index) => {
+                    (index as usize, ValType::I64)
                 },
-                0x17 => { //fload
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::F32);
+                Bytecode::Fload(index) => {
+                    (index as usize, ValType::F32)
                 },
-                0x18 => { //dload
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::F64);
+                Bytecode::Dload(index) => {
+                    (index as usize, ValType::F64)
                 },
-                0x19 => { //aload
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::I32);
+                Bytecode::Aload(index) => {
+                    (index as usize, ValType::I32)
                 },
-                0x1a..=0x1d => { //iload_<n>
-                    let index = (opcode as u32) - 0x1a;
-
-                    jvm_locals.insert(index as usize, ValType::I32);
+                Bytecode::Iload_n(index) => {
+                    (index as usize, ValType::I32)
                 },
-                0x1e..=0x21 => { //lload_<n>
-                    let index = (opcode as u32) - 0x1e;
-
-                    jvm_locals.insert(index as usize, ValType::I64);
+                Bytecode::Lload_n(index) => {
+                    (index as usize, ValType::I64)
                 },
-                0x22..=0x25 => { //fload_<n>
-                    let index = (opcode as u32) - 0x22;
-
-                    jvm_locals.insert(index as usize, ValType::F32);
+                Bytecode::Fload_n(index) => {
+                    (index as usize, ValType::F32)
                 },
-                0x26..=0x29 => { //dload_<n>
-                    let index = (opcode as u32) - 0x26;
-
-                    jvm_locals.insert(index as usize, ValType::F64);
+                Bytecode::Dload_n(index) => {
+                    (index as usize, ValType::F64)
                 },
-                0x2a..=0x2d => { //aload_<n>
-                    let index = (opcode as u32) - 0x2a;
-
-                    jvm_locals.insert(index as usize, ValType::I32);
+                Bytecode::Aload_n(index) => {
+                    (index as usize, ValType::I32)
                 },
-                0x3a => { //astore
-                    let index = bytes.read_u8().unwrap() as u32;
-
-                    jvm_locals.insert(index as usize, ValType::I32);
+                Bytecode::Astore(index) => {
+                    (index as usize, ValType::I32)
                 },
-                0x3b..=0x3e => { //istore_<n>
-                    jvm_locals.insert(opcode as usize - 0x3b, ValType::I32);
+                Bytecode::Istore_n(index) => {
+                    (index as usize, ValType::I32)
                 }
-                0x4b..=0x4e => { //astore_<n>
-                    jvm_locals.insert(opcode as usize - 0x4b, ValType::I32);
+                Bytecode::Astore_n(index) => {
+                    (index as usize, ValType::I32)
                 },
-                _ => {
-                    bytes.seek(
-                    SeekFrom::Current(Bytecode::size_of(
-                        &Bytecode::from_bytes(
-                            bytes.position() - 1,
-                            &bytes.get_ref()[bytes.position() as usize-1..bytes.get_ref().len()]
-                        ).unwrap().pop().unwrap()
-                    ) as i64)
-                ); }
-            }
-        }
+                _ => return
+            };
+
+            jvm_locals.insert(kv.0, kv.1);
+        });
 
         jvm_locals
     }
 
-    fn bytecode_intermediate(&self, code: &Code, method: &Method, class: &Class) -> Intermediate2 {
+    fn fold_bytecode(&self, code: &Code, method: &Method, class: &Class) -> Vec<FoldedBytecode> {
         ControlFlow::convert(&code.code[..]).unwrap()
     }
 
-    fn generate_block_stubs<'intermediate>(builder: &mut InstrSeqBuilder, intermediates: &'intermediate Intermediate2, first: bool) -> Result<Vec<(usize, &'intermediate Intermediate2, InstrSeqId)>, CompilationError> {
-        let mut vec: Vec<(usize, &'intermediate Intermediate2, InstrSeqId)> = Vec::new();
+    fn generate_block_stubs<'intermediate>(builder: &mut InstrSeqBuilder, intermediates: &'intermediate FoldedBytecode) -> Result<Vec<(usize, &'intermediate FoldedBytecode, InstrSeqId)>, CompilationError> {
+        let mut vec: Vec<(usize, &'intermediate FoldedBytecode, InstrSeqId)> = Vec::new();
 
-        if first {
-            if let Intermediate2::Block(v) = intermediates {
-                v.iter().for_each(|i| {
-                    vec.extend(
-                        Self::generate_block_stubs(builder, i, false).unwrap()
-                    );
-                });
-
-                return Result::Ok(vec);
-            }
-        }
+        println!("stub {:?}", intermediates);
 
         match intermediates {
-            Intermediate2::Intermediate1(_) => return Result::Err(CompilationError::InvalidIntermediate),
-            Intermediate2::Instructions(instr) => {
-                let first = instr.first();
-                if first.is_some() {
-                    vec.push(
-                        (first.unwrap().1, intermediates, builder.id())
-                    );
-                } else {
-                    panic!("shouldn't happen");
+            FoldedBytecode::Instructions(bytecode) => {
+                let first = bytecode.first();
+                match bytecode.first() {
+                    None => panic!("No instructions?"),
+                    Some(instruction) => vec.push(
+                        (instruction.1, intermediates, builder.id())
+                    )
                 }
             }
-            Intermediate2::Block(i2) => {
-                builder.block(InstrSeqType::Simple(Option::None), |builder| {
-                    i2.iter().for_each(|e| {
+            FoldedBytecode::LoopBlock(bytecode) => {
+                builder.loop_(InstrSeqType::Simple(Option::None), |builder| {
+                    bytecode.iter().for_each(|e| {
                         vec.extend(
                             Self::generate_block_stubs(
-                                builder, e, false
+                                builder, e
                             ).unwrap()
                         )
                     });
                 });
+            }
+            FoldedBytecode::Block(bytecode) => {
+                builder.block(InstrSeqType::Simple(Option::None), |builder| {
+                    bytecode.iter().for_each(|e| {
+                        vec.extend(
+                            Self::generate_block_stubs(
+                                builder, e
+                            ).unwrap()
+                        )
+                    });
+                });
+            }
+            FoldedBytecode::IfBlock(bytecode) => {
+                builder.if_else(InstrSeqType::Simple(Option::None), |builder| {
+                    bytecode.iter().for_each(|e| {
+                        vec.extend(
+                            Self::generate_block_stubs(
+                                builder, e
+                            ).unwrap()
+                        )
+                    });
+                }, |_| {});
             }
         }
 
@@ -921,14 +895,31 @@ impl<'classloader> WasmEmitter<'classloader> {
                             }
                         );
                 },
+                Bytecode::Iinc(local, increment) => {
+                    builder.local_get(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
+                    builder.i32_const(*increment as i32);
+                    builder.binop(BinaryOp::I32Add);
+                    builder.local_set(java_locals.get(&(*local as usize)).ok_or(CompilationError::UnknownLocal(*local as usize))?.clone());
+                },
                 Bytecode::If_icmpge(branch) => { //if_icmpge
                     builder.binop(BinaryOp::I32GeS);
 
-                    let index = (bytecode_index as isize) + (*branch as isize);
-
-                    builder.br_if(
-                        *block_map.get(&(index as usize)).unwrap()
-                    );
+                    // let index = (bytecode_index as isize) + (*branch as isize);
+                    //
+                    // println!("{} {:?}", index, block_map);
+                    //
+                    // builder.br_if(
+                    //     *block_map.get(&(index as usize)).unwrap()
+                    // );
+                },
+                Bytecode::If_icmpeq(branch) => {
+                    builder.binop(BinaryOp::I32Eq);
+                },
+                Bytecode::Goto(branch) => {
+                    //TODO
+                },
+                Bytecode::If_icmpne(branch) => {
+                    builder.binop(BinaryOp::I32Ne);
                 },
                 Bytecode::Ireturn | Bytecode::Areturn | Bytecode::Return => {
                     builder.return_();
@@ -1090,6 +1081,8 @@ impl<'classloader> WasmEmitter<'classloader> {
                 _ => unimplemented!("Unimplemented opcode {:?}\nClass: {}\nMethod: {}", bytecode, class.this_class, method.name)
             }
         }
+
+        // builder.i32_const(0);
 
         println!("WASM {:?}\n\n", builder.instrs);
 

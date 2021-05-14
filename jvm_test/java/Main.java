@@ -11,12 +11,9 @@ public class Main {
 //    public static native void print_long(long l);
 
     public static void main(int i) {
-
-        int a = 0;
-        int b = 1;
-
-        print_string("yoo");
-
+        for(int a=0;a<10;a++) {
+            print_string("hi");
+        }
     }
 
 }

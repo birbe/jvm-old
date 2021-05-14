@@ -2,16 +2,27 @@ use walrus::ir::Instr;
 use jvm::vm::vm::bytecode::Bytecode;
 use std::collections::HashMap;
 use std::io::{Cursor, Seek, SeekFrom};
+use std::cmp::{min, max};
 
-pub type BlockFlag = bool;
-pub type IndexedBytecode = (Bytecode, usize);
-type Intermediate1 = (IndexedBytecode, BlockFlag);
+pub type LengthOfBlock = usize;
 
 #[derive(Debug)]
-pub enum Intermediate2 {
-    Intermediate1(Vec<Intermediate1>),
+pub enum BlockType {
+    None,
+    Loop(LengthOfBlock),
+    If(LengthOfBlock)
+}
+
+pub type IndexedBytecode = (Bytecode, usize);
+
+type BytecodeWithBlockFlag = (IndexedBytecode, BlockType);
+
+#[derive(Debug)]
+pub enum FoldedBytecode {
     Instructions(Vec<IndexedBytecode>),
-    Block(Vec<Intermediate2>)
+    LoopBlock(Vec<FoldedBytecode>),
+    IfBlock(Vec<FoldedBytecode>),
+    Block(Vec<FoldedBytecode>)
 }
 
 pub struct ControlFlow {
@@ -23,9 +34,9 @@ pub struct ControlFlow {
 impl ControlFlow {
 
     //The first pass flags each location in the bytecode that requires a block
-    fn first_pass(&mut self) -> Vec<Intermediate1> {
-        let mut pass_1: Vec<Intermediate1> = self.bytecode.iter().map(|b| {
-            (b.clone(), false)
+    fn flag_bytecode(&mut self) -> Vec<BytecodeWithBlockFlag> {
+        let mut pass_1: Vec<BytecodeWithBlockFlag> = self.bytecode.iter().map(|b| {
+            (b.clone(), BlockType::None)
         }).collect();
 
         for index in 0..self.bytecode.len() {
@@ -51,10 +62,23 @@ impl ControlFlow {
                 Bytecode::Ifle(offset) |
                 Bytecode::Ifnonnull(offset) |
                 Bytecode::Ifnull(offset) => {
-                    let i = ((byte_index as isize) + (*offset as isize)) as usize;
-                    let index = *self.source_byte_to_bytecode.get(&i).unwrap();
-                    let entry: &mut Intermediate1 = pass_1.get_mut(index).unwrap();
-                    entry.1 = true;
+                    let target_bytecode_index = *self.source_byte_to_bytecode.get(
+                        &(( (byte_index as isize) + (*offset as isize) ) as usize)
+                    ).unwrap();
+                    // let entry: &mut BytecodeWithBlockFlag = pass_1.get_mut(index).unwrap();
+
+                    let block_min_index = min(target_bytecode_index, index);
+                    let block_max_index = max(target_bytecode_index, index);
+
+                    let block_size = block_max_index - block_min_index;
+
+                    let block_begin: &mut BytecodeWithBlockFlag = pass_1.get_mut(block_min_index).unwrap();
+
+                    block_begin.1 = if *offset <= 0 { //if the offset is less than or equal to 0, it's a loop
+                        BlockType::Loop(block_size)
+                    } else {
+                        BlockType::If(block_size)
+                    };
                 },
 
                 Bytecode::Jsr(_) => unimplemented!(),
@@ -71,67 +95,72 @@ impl ControlFlow {
         pass_1
     }
 
-    fn second_pass(i2: Intermediate2) -> Intermediate2 {
-        match i2 {
-            Intermediate2::Intermediate1(i1) => {
-                let mut bytecodes = Vec::new();
-                //this to Intermediate2::Instructions
+    fn fold_bytecode(flagged: &[BytecodeWithBlockFlag], in_block: bool) -> Vec<FoldedBytecode> {
+        let mut folded: Vec<FoldedBytecode> = Vec::new();
 
-                for index in 0..i1.len() {
-                    let entry = i1.get(index).unwrap();
-                    if entry.1 { //Make a block, starting from here
-                        let mut block: Vec<Intermediate1> = Vec::new();
-                        block.push(
-                            (
-                                entry.0.clone(), false
-                            )
-                        );
+        let mut bytecodes: Vec<IndexedBytecode> = Vec::new();
 
-                        let following: Vec<Intermediate1> = (index+1..i1.len()).map(|i| {
-                            i1.get(i).unwrap().clone()
-                        }).collect();
+        let mut index = 0;
 
-                        block.extend(following);
+        while index < flagged.len() {
+            let (indexed_bytecode, blocktype) = flagged.get(index).unwrap();
 
-                        return if bytecodes.len() > 0 {
-                            Intermediate2::Block(
-                                vec![
-                                    Intermediate2::Instructions(bytecodes),
-                                    Self::second_pass(Intermediate2::Block(
-                                        vec![
-                                            Intermediate2::Intermediate1(block)
-                                        ]
-                                    ))
-                                ]
-                            )
-                        } else {
-                            Self::second_pass(Intermediate2::Block(
-                                vec![
-                                    Intermediate2::Intermediate1(block)
-                                ]
-                            ))
-                        }
-                    } else {
-                        bytecodes.push(entry.0.clone());
+            if index == 0 && in_block {
+                bytecodes.push(indexed_bytecode.clone());
+                index += 1;
+                continue;
+            }
+
+            match blocktype {
+                BlockType::None => {
+                    bytecodes.push(indexed_bytecode.clone());
+                    index += 1;
+                }, //Push the instruction
+                BlockType::Loop(length) => {
+                    //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
+
+                    if bytecodes.len() > 0 {
+                        let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
+                        std::mem::swap(&mut bytecodes, &mut swap_vec);
+                        folded.push(FoldedBytecode::Instructions(swap_vec));
                     }
-                }
 
-                Intermediate2::Instructions(bytecodes)
-            },
-            Intermediate2::Instructions(i) => Intermediate2::Instructions(i), //End case, no more blocks to add
-            Intermediate2::Block(mut block) => {
-                let mut new = Vec::new();
-                for _ in 0..block.len() {
-                    new.push(
-                        Self::second_pass(block.remove(0))
+                    folded.push(
+                        FoldedBytecode::LoopBlock(Self::fold_bytecode(&flagged[index..], true))
                     );
+
+                    index += length + 1;
                 }
-                Intermediate2::Block(new)
+                BlockType::If(length) => {
+                    //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
+
+                    bytecodes.push(
+                        indexed_bytecode.clone()
+                    );
+
+                    dbg!(&bytecodes);
+
+                    let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
+                    std::mem::swap(&mut bytecodes, &mut swap_vec);
+                    folded.push(FoldedBytecode::Instructions(swap_vec));
+
+                    folded.push(
+                        FoldedBytecode::IfBlock(Self::fold_bytecode(&flagged[index+1..], true))
+                    );
+
+                    index += length + 1;
+                }
             }
         }
+
+        if bytecodes.len() > 0 {
+            folded.push(FoldedBytecode::Instructions(bytecodes));
+        }
+
+        folded
     }
 
-    pub fn convert(bytecode: &[u8]) -> Option<Intermediate2> {
+    pub fn convert(bytecode: &[u8]) -> Option<Vec<FoldedBytecode>> {
         let mut control_flow = Self {
             source_bytecode_to_byte: HashMap::new(),
             source_byte_to_bytecode: HashMap::new(),
@@ -149,10 +178,11 @@ impl ControlFlow {
             control_flow.bytecode.push((bytecode, index as usize));
         });
 
-        let i1 = control_flow.first_pass();
+        let flagged_bytecode: Vec<BytecodeWithBlockFlag> = control_flow.flag_bytecode();
 
-        let mut i2 = Intermediate2::Intermediate1(i1);
-        Option::Some(Self::second_pass(i2))
+        let folded_bytecode = ControlFlow::fold_bytecode(&flagged_bytecode[..], false);
+
+        Option::Some(folded_bytecode)
     }
 
 }
@@ -164,7 +194,7 @@ impl From<Vec<u8>> for ControlFlow {
 }
 
 pub enum WasmIR {
-    Instruction(Intermediate1),
+    Instruction(BytecodeWithBlockFlag),
     Block(Vec<WasmIR>)
 }
 
