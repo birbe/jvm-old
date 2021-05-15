@@ -3,19 +3,21 @@ use jvm::vm::vm::bytecode::Bytecode;
 use std::collections::HashMap;
 use std::io::{Cursor, Seek, SeekFrom};
 use std::cmp::{min, max};
+use crate::control_graph::{NodeGraph, Node};
+use std::ops::Range;
 
 pub type LengthOfBlock = usize;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum BlockType {
     None,
-    Loop(LengthOfBlock),
-    If(LengthOfBlock)
+    Loop,
+    Block
 }
 
 pub type IndexedBytecode = (Bytecode, usize);
 
-type BytecodeWithBlockFlag = (IndexedBytecode, BlockType);
+type BytecodeWithBlockFlag = (IndexedBytecode, Vec<BlockType>);
 
 #[derive(Debug)]
 pub enum FoldedBytecode {
@@ -31,12 +33,26 @@ pub struct ControlFlow {
     pub bytecode: Vec<IndexedBytecode>
 }
 
+pub type ScopedNode = (Node<IndexedBytecode>, usize, Vec<BlockType>);
+
 impl ControlFlow {
 
-    //The first pass flags each location in the bytecode that requires a block
-    fn flag_bytecode(&mut self) -> Vec<BytecodeWithBlockFlag> {
-        let mut pass_1: Vec<BytecodeWithBlockFlag> = self.bytecode.iter().map(|b| {
-            (b.clone(), BlockType::None)
+    fn make_control_flow_graph(&mut self) -> NodeGraph<IndexedBytecode> {
+
+        println!("Entered");
+
+        let mut id = 0;
+
+        let mut nodes: Vec<Node<IndexedBytecode>> = self.bytecode.iter().map(|bytecode| {
+            let node = Node {
+                id,
+                front_edges: vec![],
+                bytecode: bytecode.clone()
+            };
+
+            id += 1;
+
+            node
         }).collect();
 
         for index in 0..self.bytecode.len() {
@@ -45,7 +61,6 @@ impl ControlFlow {
             let byte_index = *self.source_bytecode_to_byte.get(&index).unwrap();
 
             match &instr.0 {
-                Bytecode::Goto(offset) |
                 Bytecode::If_acmpeq(offset) |
                 Bytecode::If_acmpne(offset) |
                 Bytecode::If_icmpeq(offset) |
@@ -65,21 +80,20 @@ impl ControlFlow {
                     let target_bytecode_index = *self.source_byte_to_bytecode.get(
                         &(( (byte_index as isize) + (*offset as isize) ) as usize)
                     ).unwrap();
-                    // let entry: &mut BytecodeWithBlockFlag = pass_1.get_mut(index).unwrap();
 
-                    let block_min_index = min(target_bytecode_index, index);
-                    let block_max_index = max(target_bytecode_index, index);
+                    if index < self.bytecode.len() - 1 { //Conditional, so also add the next instruction
+                        nodes.get_mut(index).unwrap().front_edges.push(index + 1);
+                    }
 
-                    let block_size = block_max_index - block_min_index;
-
-                    let block_begin: &mut BytecodeWithBlockFlag = pass_1.get_mut(block_min_index).unwrap();
-
-                    block_begin.1 = if *offset <= 0 { //if the offset is less than or equal to 0, it's a loop
-                        BlockType::Loop(block_size)
-                    } else {
-                        BlockType::If(block_size)
-                    };
+                    nodes.get_mut(index).unwrap().front_edges.push(target_bytecode_index);
                 },
+                Bytecode::Goto(offset) => {
+                    let target_bytecode_index = *self.source_byte_to_bytecode.get(
+                        &(( (byte_index as isize) + (*offset as isize) ) as usize)
+                    ).unwrap();
+
+                    nodes.get_mut(index).unwrap().front_edges.push(target_bytecode_index);
+                }
 
                 Bytecode::Jsr(_) => unimplemented!(),
                 Bytecode::Jsr_w(_) => unimplemented!(),
@@ -88,11 +102,72 @@ impl ControlFlow {
                 Bytecode::Swap => {}
                 Bytecode::Tableswitch => {}
                 Bytecode::Wide(_) => {}
-                _ => {}
+
+                _ => if index < self.bytecode.len() - 1 { //Non control-flow related instruction
+                    nodes.get_mut(index).unwrap().front_edges.push(index + 1);
+                }
             }
         }
 
-        pass_1
+        println!("Exited");
+
+        NodeGraph {
+            nodes
+        }
+
+    }
+
+    //The first pass flags each location in the bytecode that requires a block
+    fn flag_bytecode(&mut self, graph: NodeGraph<IndexedBytecode>) -> Vec<BytecodeWithBlockFlag> {
+
+        let mut scoped: Vec<ScopedNode> = graph.nodes.into_iter().map(|node| {
+            (node, 0, Vec::new())
+        }).collect();
+
+        let scoped_view = scoped.clone();
+
+        let scopes: Vec<(Range<usize>, BlockType)> = Vec::new();
+
+        //Define the scopes that each instruction is located in
+
+        for index in 0..scoped_view.len() {
+            let (node, _, _) = scoped_view.get(index).unwrap();
+
+            node.front_edges.iter().for_each(|front_id| {
+                if *front_id < index { //Loop, create a scope ending at this instruction and beginning at the target
+                    (*front_id..index).for_each(|front_index| {
+                        scoped.get_mut(front_index).unwrap().1 += 1;
+                    });
+                    scoped.get_mut(*front_id).unwrap().2.push(BlockType::Loop);
+                } else if (*front_id - index) > 1 { //Jump forwards
+                    let depth = scoped.get(index).unwrap().1;
+
+                    let mut begin: Option<usize> = Option::None;
+
+                    for node_index in index..=0 {
+                        if scoped.get(node_index).unwrap().1 < depth {
+                            begin = Option::Some(node_index + 1);
+                            break;
+                        } else if node_index == 0 {
+                            begin = Option::Some(0);
+                        }
+                    }
+
+                    let begin = begin.expect(&format!("{} {:?}", index, scoped));
+
+                    (begin..*front_id).for_each(|front_index| {
+                        scoped.get_mut(front_index).unwrap().1 += 1;
+                    });
+
+                    scoped.get_mut(begin).unwrap().2.push(BlockType::Block);
+                }
+            });
+        }
+
+        scoped.into_iter().map(|scoped_node: ScopedNode| {
+            (scoped_node.0.bytecode, scoped_node.2)
+        }).collect()
+
     }
 
     fn fold_bytecode(flagged: &[BytecodeWithBlockFlag], in_block: bool) -> Vec<FoldedBytecode> {
@@ -103,7 +178,7 @@ impl ControlFlow {
         let mut index = 0;
 
         while index < flagged.len() {
-            let (indexed_bytecode, blocktype) = flagged.get(index).unwrap();
+            let (indexed_bytecode, blocktypes) = flagged.get(index).unwrap();
 
             if index == 0 && in_block {
                 bytecodes.push(indexed_bytecode.clone());
@@ -111,47 +186,53 @@ impl ControlFlow {
                 continue;
             }
 
-            match blocktype {
-                BlockType::None => {
-                    bytecodes.push(indexed_bytecode.clone());
-                    index += 1;
-                }, //Push the instruction
-                BlockType::Loop(length) => {
-                    //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
 
-                    if bytecodes.len() > 0 {
-                        let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
-                        std::mem::swap(&mut bytecodes, &mut swap_vec);
-                        folded.push(FoldedBytecode::Instructions(swap_vec));
-                    }
 
-                    folded.push(
-                        FoldedBytecode::LoopBlock(Self::fold_bytecode(&flagged[index..], true))
-                    );
+            blocktypes.iter().for_each(|block| {
 
-                    index += length + 1;
-                }
-                BlockType::If(length) => {
-                    //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
+            });
 
-                    bytecodes.push(
-                        indexed_bytecode.clone()
-                    );
-
-                    dbg!(&bytecodes);
-
-                    let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
-                    std::mem::swap(&mut bytecodes, &mut swap_vec);
-                    folded.push(FoldedBytecode::Instructions(swap_vec));
-
-                    folded.push(
-                        FoldedBytecode::IfBlock(Self::fold_bytecode(&flagged[index+1..], true))
-                    );
-
-                    index += length + 1;
-                }
-            }
+            // match blocktype {
+            //     BlockType::None => {
+            //         bytecodes.push(indexed_bytecode.clone());
+            //         index += 1;
+            //     }, //Push the instruction
+            //     BlockType::Loop(length) => {
+            //         //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
+            //
+            //         if bytecodes.len() > 0 {
+            //             let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
+            //             std::mem::swap(&mut bytecodes, &mut swap_vec);
+            //             folded.push(FoldedBytecode::Instructions(swap_vec));
+            //         }
+            //
+            //         folded.push(
+            //             FoldedBytecode::LoopBlock(Self::fold_bytecode(&flagged[index..], true))
+            //         );
+            //
+            //         index += length + 1;
+            //     }
+            //     BlockType::Block(length) => {
+            //         //Beginning of a loop, assemble the previous bytecodes we've compiled in the bytecodes vec
+            //
+            //         bytecodes.push(
+            //             indexed_bytecode.clone()
+            //         );
+            //
+            //         let mut swap_vec: Vec<IndexedBytecode> = Vec::new();
+            //         std::mem::swap(&mut bytecodes, &mut swap_vec);
+            //         folded.push(FoldedBytecode::Instructions(swap_vec));
+            //
+            //         folded.push(
+            //             FoldedBytecode::IfBlock(Self::fold_bytecode(&flagged[index+1..], true))
+            //         );
+            //
+            //         index += length + 1;
+            //     }
+            // }
         }
+
+        unimplemented!();
 
         if bytecodes.len() > 0 {
             folded.push(FoldedBytecode::Instructions(bytecodes));
@@ -178,11 +259,13 @@ impl ControlFlow {
             control_flow.bytecode.push((bytecode, index as usize));
         });
 
-        let flagged_bytecode: Vec<BytecodeWithBlockFlag> = control_flow.flag_bytecode();
+        let graph = control_flow.make_control_flow_graph();
+        let flagged_bytecode: Vec<BytecodeWithBlockFlag> = control_flow.flag_bytecode(graph);
+        dbg!(&flagged_bytecode);
 
-        let folded_bytecode = ControlFlow::fold_bytecode(&flagged_bytecode[..], false);
+        // let folded_bytecode = ControlFlow::fold_bytecode(&flagged_bytecode[..], false);
 
-        Option::Some(folded_bytecode)
+        Option::Some(Vec::new())
     }
 
 }

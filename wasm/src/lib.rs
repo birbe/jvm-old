@@ -1,6 +1,7 @@
 #![feature(try_trait)]
 
 mod ir;
+mod control_graph;
 
 use jvm;
 use jvm::vm::class::{Class, Method, MethodDescriptor, FieldDescriptor, BaseType, MethodReturnType, AccessFlags};
@@ -727,8 +728,6 @@ impl<'classloader> WasmEmitter<'classloader> {
             instrs: vec![]
         };
 
-        println!("Class {} {}\nJava {:?}", method.name, class.this_class, code);
-
         for ib in code.iter() {
 
             let bytecode = &ib.0;
@@ -921,6 +920,9 @@ impl<'classloader> WasmEmitter<'classloader> {
                 Bytecode::If_icmpne(branch) => {
                     builder.binop(BinaryOp::I32Ne);
                 },
+                Bytecode::Ifne(branch) => {
+                    builder.binop(BinaryOp::I32Ne);
+                }
                 Bytecode::Ireturn | Bytecode::Areturn | Bytecode::Return => {
                     builder.return_();
                 },
@@ -1081,10 +1083,6 @@ impl<'classloader> WasmEmitter<'classloader> {
                 _ => unimplemented!("Unimplemented opcode {:?}\nClass: {}\nMethod: {}", bytecode, class.this_class, method.name)
             }
         }
-
-        // builder.i32_const(0);
-
-        println!("WASM {:?}\n\n", builder.instrs);
 
         Result::Ok(builder.instrs)
     }
