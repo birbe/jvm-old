@@ -86,25 +86,19 @@ Mode: i (interpreted) OR wasm (compile to wasm and execute with Wasmtime)
 
 ---
 
-## Technical Constraints
+## Technical Stuff
 
 #### Control flow
 
-Java bytecode uses arbitrary goto/jump instructions, which does not directly
-map to WASM. WASM uses a static block format, where you define sets of instructions,
-of which you can then run commands to go to.
+Java bytecode's control flow is much more loose than that of WASM's; WASM uses a method of control flow where all code blocks
+must be predefined in the instructions. You can't just arbitrarily jump to an instruction.
+Because of this, a control-flow graph is generated that defines where each Java bytecode can jump to, and that is
+then converted into WASM.
 
-#### Classloaders
+#### Classloaders / AOT / JIT
 
-Due to the (current!) lack of actual support for dynamic linking within WASM,
-user-defined classloaders will not work (within WASM compilation mode). It might technically be possible
-to support dynamic classloading without dynamic linking, but it would have massive
-overhead as it would hypothetically require generating a new WASM
-module for every class, and having them all function together through JavaScript, which would be massively slow.
-
-#### JIT/Interpreted mode
-
-Due to the current lack of stable support for dynamic linking in WASM,
-it's not possible to have a mixed execution mode like you can find in the Oracle JVM,
-which is able to gather statistics on hotspots within bytecode, and JIT them to native code
-to have them run faster. As JITed code should essentially always run faster, however, this feature is probably useless.
+WASM does not yet have stable support for dynamic linking, so more work will have to be put in to make dynamic
+classloading (such as user-defined classloaders or ASM) work. One method that could be explored is having the JVM
+(compiled into WASM) be executed by JavaScript, which could then oversee the compilation of certain
+hotspots in the Java code into WASM, and then executing the generated methods in WASM instead of having it be
+interpreted. 
