@@ -142,18 +142,20 @@ impl ControlFlow {
                 } else if (*front_id - index) > 1 { //Jump forwards
                     let depth = scoped.get(index).unwrap().1;
 
-                    let mut begin: Option<usize> = Option::None;
+                    let begin = 0;
 
-                    for node_index in index..=0 {
-                        if scoped.get(node_index).unwrap().1 < depth {
-                            begin = Option::Some(node_index + 1);
-                            break;
-                        } else if node_index == 0 {
-                            begin = Option::Some(0);
-                        }
-                    }
-
-                    let begin = begin.expect(&format!("{} {:?}", index, scoped));
+                    // for node_index in index..=0 {
+                    //     if scoped.get(node_index).unwrap().1 < depth {
+                    //         begin = Option::Some(node_index + 1);
+                    //         println!("Found a scope");
+                    //         break;
+                    //     } else if node_index == 0 {
+                    //         begin = Option::Some(0);
+                    //         println!("Defaulting to 0");
+                    //     }
+                    // }
+                    //
+                    // let begin = begin.expect(&format!("{} {:?}", index, scoped));
 
                     (begin..*front_id).for_each(|front_index| {
                         scoped.get_mut(front_index).unwrap().1 += 1;
