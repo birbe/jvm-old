@@ -127,10 +127,10 @@ fn run_vm(path: PathBuf) {
 
     let start;
 
+    let mut steps = 0;
+
     {
         let (_, main) = vm.class_loader.borrow_mut().load_and_link_class("Main").ok().unwrap();
-
-        vm.start_time = SystemTime::now();
 
         let thread = vm.spawn_thread("Main", "Main", "main", "(I)V", vec![
             String::from("Hello world!")
@@ -138,15 +138,35 @@ fn run_vm(path: PathBuf) {
 
         let mut mut_thread = vm.threads.get_mut("Main").unwrap();
 
+        vm.start_time = SystemTime::now();
         start = SystemTime::now();
+
+        let mut step_start = SystemTime::now();
 
         while mut_thread.get_stack_count() > 0 {
             match mut_thread.step() {
                 Ok(_) => {}
                 Err(e) => panic!(format!("{:?}", e))
             }
+
+            steps += 1;
         }
     }
 
-    println!("\n[Execution has finished.]\nTime elapsed: {}ms\nObject count: {}", SystemTime::now().duration_since(start).unwrap().as_millis(), vm.heap.borrow().objects.len());
+    let elapsed = SystemTime::now().duration_since(start).unwrap().as_nanos();
+
+    println!("\n[Execution has finished.]\nAverage step time: {}ns\nSteps: {}\nTime elapsed: {}ms\nObject count: {}", elapsed/steps, steps, SystemTime::now().duration_since(start).unwrap().as_millis(), vm.heap.borrow().objects.len());
+}
+
+#[cfg(test)]
+mod tests {
+    use jvm::vm::class::FieldDescriptor;
+
+    #[test]
+    fn descriptors() {
+        let field_descriptor_str = "Ljava/lang/String;([[[B);";
+        let field_descriptor = FieldDescriptor::parse(field_descriptor_str).unwrap();
+        assert_eq!(String::from(&field_descriptor), field_descriptor_str);
+    }
+
 }

@@ -14,7 +14,7 @@ mod tests {
 
         if let FieldDescriptor::ObjectType(string) = a {
             assert_eq!("java/lang/Object", string);
-        } else { panic!("FieldDescriptor must be an ObjectType variant"); }
+        } else {  panic!("FieldDescriptor must be an ObjectType variant"); }
 
         if let FieldDescriptor::ArrayType(array_type) = b {
             let f = *array_type.field_descriptor;

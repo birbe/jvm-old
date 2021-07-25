@@ -2,14 +2,17 @@ use crate::vm::class::attribute::{Attribute};
 use crate::vm::class::constant::Constant;
 
 use std::io::{Cursor, Read, Seek, Error};
-use byteorder::{ReadBytesExt, BigEndian};
-use std::collections::HashMap;
-use std::mem::size_of;
+use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
+use std::collections::{HashMap, HashSet};
+
 use crate::vm::vm::{OperandType};
 use std::rc::Rc;
 use std::sync::RwLock;
-use std::io;
-use std::option::NoneError;
+
+use crate::vm::vm::bytecode::Bytecode;
+use std::collections::hash_map::RandomState;
+use std::ops::Add;
+use std::borrow::Borrow;
 
 #[derive(Debug)]
 pub struct Class { //Parsed info from the .class file
@@ -19,20 +22,90 @@ pub struct Class { //Parsed info from the .class file
     pub super_class: String,
     pub interfaces: Vec<u16>, //Index into the constant pool
     pub field_map: HashMap<String, ObjectField>,
-    pub method_map: HashMap<String, HashMap<String, Rc<Method>>>,
+    pub method_map: HashMap<(String, String), Rc<Method>>,
     pub attribute_map: HashMap<String, Attribute>,
-
-    pub static_been_seen: Rc<RwLock<bool>>,
-
     pub heap_size: usize,
     pub full_heap_size: usize //Heap size of this class plus the superclass
     //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
 }
 
+///Method for easily creating classes
+///
+/// ```
+/// use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
+/// use jvm::vm::vm::bytecode::Bytecode;
+/// let mut class_builder = ClassBuilder::new();
+/// let mut method_builder = MethodBuilder::new(String::from("add"), MethodDescriptor::parse("(II)I;").unwrap(), 1);
+///
+/// method_builder.set_instructions(vec![
+///     Bytecode::Iload(1),
+///     Bytecode::Iload(2),
+///     Bytecode::Iadd
+///     Bytecode::Ireturn
+/// ]);
+///
+/// class_builder.add_method(method_builder);
+/// ```
+pub struct ClassBuilder {
+    pub access_flags: u16,
+    pub this_class: Option<String>,
+    pub super_class: Option<String>,
+    pub constant_set: HashSet<Constant>,
+    pub field_map: HashMap<String, ObjectField>,
+    pub method_map: HashMap<String, HashMap<String, Method>>,
+    pub attribute_map: HashMap<String, Attribute>
+}
+
+impl ClassBuilder {
+
+    pub fn new() -> Self {
+        Self {
+            access_flags: 0,
+            this_class: None,
+            super_class: None,
+            constant_set: Default::default(),
+            field_map: Default::default(),
+            method_map: Default::default(),
+            attribute_map: Default::default()
+        }
+    }
+
+    pub fn add_method(&mut self, method_builder: MethodBuilder) {
+        let name = &method_builder.name;
+
+        match self.method_map.get(name) {
+            None => { self.method_map.insert(name.clone(), HashMap::new()); },
+            Some(_) => {}
+        };
+
+
+
+        // self.method_map.get(&name).unwrap().insert(method_descriptor.into(), );
+    }
+
+    pub fn serialize(self) -> Vec<u8> {
+        use byteorder::{ByteOrder, BigEndian};
+
+        let mut class = Vec::new();
+
+        BigEndian::write_u32(&mut class, 0xCAFEBABE); //Magic
+
+        BigEndian::write_u16(&mut class, 70); //Minor
+        BigEndian::write_u16(&mut class, 51); //Major
+
+        BigEndian::write_u16(&mut class, self.constant_set.len() as u16 + 1);
+
+        class
+        // class.into_inner()
+    }
+
+}
+
 #[derive(Debug)]
 pub enum ClassError {
     FieldNotFound,
-    MethodNotFound
+    MethodNotFound,
+    ConstantNotFound
 }
 
 impl Class {
@@ -41,11 +114,11 @@ impl Class {
     }
 
     pub fn get_method(&self, name: &str, descriptor: &str) -> Result<Rc<Method>, ClassError> {
-        self.method_map.get(name).ok_or(ClassError::MethodNotFound)?.get(descriptor).cloned().ok_or(ClassError::MethodNotFound)
+        self.method_map.get((name, descriptor)).ok_or(ClassError::MethodNotFound)?.get(descriptor).cloned().ok_or(ClassError::MethodNotFound)
     }
 
     pub fn has_method(&self, name: &str, descriptor: &str) -> bool {
-        if self.method_map.contains_key(name) {
+        if self.method_map.contains_key((name, descriptor)) {
             if self.method_map.get(name).unwrap().contains_key(descriptor) {
                 true
             } else {
@@ -218,6 +291,41 @@ pub struct Method {
     pub attribute_map: HashMap<String, Attribute>
 }
 
+pub struct MethodBuilder {
+    pub access_flags: u16,
+    pub name: String,
+    pub descriptor: MethodDescriptor,
+    pub attribute_map: HashMap<String, Attribute>,
+    pub instructions: Vec<Bytecode>
+}
+
+impl MethodBuilder {
+    pub fn new(name: String, descriptor: MethodDescriptor, access_flags: u16) -> Self {
+        Self {
+            access_flags,
+            name,
+            descriptor,
+            attribute_map: HashMap::new(),
+            instructions: Vec::new()
+        }
+    }
+
+    pub fn set_instructions(mut self, instr: Vec<Bytecode>) -> Self {
+        self.instructions = instr;
+        self
+    }
+
+    pub fn set_attributes(mut self, attribute_map: HashMap<String, Attribute>) -> Self {
+        self.attribute_map = attribute_map;
+        self
+    }
+
+    pub fn set_attribute(mut self, key: String, attribute: Attribute) -> Self {
+        self.attribute_map.insert(key, attribute);
+        self
+    }
+}
+
 #[derive(Debug)]
 pub enum FieldDescriptor {
     BaseType(BaseType),
@@ -225,6 +333,26 @@ pub enum FieldDescriptor {
     ObjectType(String),
     //ArrayType will be an ArrayType struct containing the amount of dimensions and a FieldDescriptor that resolves to either BaseType or ObjectType
     ArrayType(ArrayType)
+}
+
+impl From<&FieldDescriptor> for String {
+    fn from(fd: &FieldDescriptor) -> String {
+        match &fd {
+            FieldDescriptor::BaseType(bt) => {
+                bt.into()
+            }
+            FieldDescriptor::ObjectType(class_name) => {
+                format!("L{};", class_name)
+            }
+            FieldDescriptor::ArrayType(array) => {
+                let fd: String = (&*array.field_descriptor).into();
+
+                (0..array.dimensions).map(|_| "[").collect::<String>().add(
+                    &fd
+                )
+            }
+        }
+    }
 }
 
 impl FieldDescriptor {
@@ -299,6 +427,15 @@ pub enum MethodReturnType {
     FieldDescriptor(FieldDescriptor)
 }
 
+impl From<&MethodReturnType> for String {
+    fn from(m: &MethodReturnType) -> Self {
+        match m {
+            MethodReturnType::Void => String::from("V"),
+            MethodReturnType::FieldDescriptor(fd) => fd.into()
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     InvalidBaseType,
@@ -311,12 +448,6 @@ pub enum ParseError {
 impl From<std::io::Error> for ParseError {
     fn from(e: std::io::Error) -> Self {
         Self::IOError(e)
-    }
-}
-
-impl From<NoneError> for ParseError {
-    fn from(_: NoneError) -> Self {
-        Self::NoneError
     }
 }
 
@@ -366,6 +497,14 @@ impl MethodDescriptor {
     }
 }
 
+impl From<&MethodDescriptor> for String {
+    fn from(md: &MethodDescriptor) -> String {
+        format!(
+            "({}){}", md.parameters.iter().map(|param| String::from(param)).collect::<String>(), String::from(&md.return_type)
+        )
+    }
+}
+
 #[derive(Debug)]
 pub enum BaseType {
     Byte,
@@ -390,7 +529,7 @@ impl BaseType {
             "J" => BaseType::Long,
             "S" => BaseType::Short,
             "Z" => BaseType::Bool,
-            c => return Err(ParseError::InvalidBaseType)
+            _c => return Err(ParseError::InvalidBaseType)
         })
     }
 
@@ -424,6 +563,22 @@ impl BaseType {
                 2
             }
         }) as usize
+    }
+}
+
+impl Into<String> for &BaseType {
+    fn into(self) -> String {
+        match self {
+            BaseType::Byte => String::from("B"),
+            BaseType::Char => String::from("C"),
+            BaseType::Double => String::from("D"),
+            BaseType::Float => String::from("F"),
+            BaseType::Int => String::from("I"),
+            BaseType::Long => String::from("J"),
+            BaseType::Short => String::from("S"),
+            BaseType::Bool => String::from("Z"),
+            BaseType::Reference => String::from("L") //???
+        }
     }
 }
 
@@ -516,11 +671,11 @@ impl FieldInfo {
 //for the JVM, ironically, because Annotations are actually a form of attribute at compile-time.
 pub mod attribute {
     use crate::vm::class::attribute::stackmap::StackMapFrame;
-    use std::io::{Cursor, Read, Seek, SeekFrom};
+    use std::io::{Read, Seek, SeekFrom};
     use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::constant::{Constant};
     use crate::vm::class::{ConstantPool, ParseError};
-    use crate::vm::vm::bytecode::Bytecode;
+    
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     #[derive(Debug)]
@@ -536,7 +691,7 @@ pub mod attribute {
             let attribute_name_index = rdr.read_u16::<BigEndian>()?;
             let length = rdr.read_u32::<BigEndian>()?;
 
-            let max_pos = start_pos+(length as u64)+6; //in bytes
+            let _max_pos = start_pos+(length as u64)+6; //in bytes
 
             let attribute_constant: &Constant = constant_pool.get(attribute_name_index as usize)?;
 
@@ -808,7 +963,7 @@ pub mod attribute {
 }
 
 pub mod constant {
-    use std::io::{Cursor, Read, Seek};
+    use std::io::{Read, Seek};
     use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::{ConstantPool, ParseError};
 
@@ -911,7 +1066,7 @@ pub mod constant {
     }
 
     impl Constant {
-        pub fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Result<Constant, ParseError> {
+        pub fn from_bytes<R: Read + Seek>(rdr: &mut R, _constant_pool: &ConstantPool) -> Result<Constant, ParseError> {
             let tag = rdr.read_u8()?;
             let as_pool_tag: PoolTag = tag.into();
 
@@ -940,6 +1095,25 @@ pub mod constant {
                 PoolTag::MethodType => Constant::MethodType(rdr.read_u16::<BigEndian>()?),
                 PoolTag::InvokeDynamic => Constant::InvokeDynamic(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?)
             })
+        }
+
+        pub fn to_bytes(&self) -> Vec<u8> {
+            match self {
+                Constant::Utf8(string) => string.as_bytes().into(),
+                Constant::Integer(integer) => integer.to_be_bytes().into(),
+                Constant::Float(float) => float.to_be_bytes().into(),
+                Constant::Long(long) => long.to_be_bytes().into(),
+                Constant::Double(double) => double.to_be_bytes().into(),
+                Constant::Class(index) => index.to_be_bytes().into(),
+                Constant::String(index) => index.to_be_bytes().into(),
+                Constant::FieldRef(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+                Constant::MethodRef(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+                Constant::InterfaceMethodRef(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+                Constant::NameAndType(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+                Constant::MethodHandle(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+                Constant::MethodType(index) => index.to_be_bytes().into(),
+                Constant::InvokeDynamic(index1, index2) => &[index1.to_be_bytes().into(), index2.to_be_bytes().into()].into_iter().flatten().collect::<Vec<u8>>(),
+            }
         }
     }
 }

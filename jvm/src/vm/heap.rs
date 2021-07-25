@@ -1,5 +1,5 @@
 use std::rc::Rc;
-use crate::vm::class::{Class, Method};
+use crate::vm::class::{Class};
 use std::alloc::{Layout, dealloc};
 use core::mem;
 use crate::vm::vm::{Operand, OperandType};
@@ -8,19 +8,26 @@ use std::collections::HashMap;
 use std::mem::size_of;
 
 use std::alloc::alloc;
-use crate::vm::linker::loader::are_classpaths_siblings;
 
 pub struct Heap {
     pub strings: HashMap<String, usize>,
-
+    pub raw: RawHeap,
     pub objects: Vec<Object>,
     available_object_ids: Vec<usize>
 }
 
+pub struct RawHeap {
+    pub size: usize,
+    pub ptr: *mut u8,
+    pub used: usize,
+    pub layout: Layout
+}
+
 impl Heap {
-    pub fn new() -> Self {
+    pub fn new(size: usize) -> Self {
         Self {
             strings: HashMap::new(),
+            raw: unsafe { Self::allocate_heap(size) },
             objects: Vec::new(),
             available_object_ids: Vec::new()
         }
@@ -32,7 +39,7 @@ impl Heap {
         }
 
         let id = self.create_object(str_class.clone());
-        let chars_ptr = Self::allocate_chars(string);
+        let chars_ptr = self.allocate_chars(string);
 
         self.put_field::<usize>(
             id,
@@ -46,26 +53,31 @@ impl Heap {
         id
     }
 
-    pub fn allocate_class(class: Rc<Class>) -> *mut u8 {
-        unsafe {
-            //Make a layout with the exact size of the object
-            let layout = Layout::from_size_align(class.full_heap_size, 2).unwrap();
-            //Allocate
-            alloc(layout)
+    pub fn allocate_heap(size: usize) -> RawHeap {
+        let layout = Layout::from_size_align(size, 2).unwrap();
+        let ptr = unsafe { alloc(layout) };
+
+        RawHeap {
+            size,
+            ptr,
+            used: 0,
+            layout
         }
     }
 
-    pub fn deallocate_class(class: Rc<Class>, ptr: *mut u8) {
-        unsafe {
-            let layout = Layout::from_size_align(class.full_heap_size, 2).unwrap();
+    pub fn allocate_class(&mut self, class: Rc<Class>) -> *mut u8 {
+        let ptr = unsafe { self.raw.ptr.offset(self.raw.used as isize) }; //TODO: bounds check
+        self.raw.used += class.full_heap_size;
+        ptr as *mut u8
+    }
 
-            dealloc(ptr, layout);
-        }
+    pub fn deallocate_class(class: Rc<Class>, ptr: *mut u8) {
+        //...
     }
 
     pub fn create_object(&mut self, class: Rc<Class>) -> usize {
         let info = Object {
-            ptr: Self::allocate_class(class.clone()),
+            ptr: self.allocate_class(class.clone()),
             class: class.clone()
         };
 
@@ -123,7 +135,7 @@ impl Heap {
         }
     }
 
-    pub fn allocate_array(intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
+    pub fn allocate_array(&mut self, intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
         let id = InternArrayType::convert_to_u8(intern_type);
 
         let header = Layout::new::<ArrayHeader>();
@@ -135,11 +147,12 @@ impl Heap {
         assert!(length < u16::MAX as usize);
 
         unsafe {
-            let ptr = alloc(layout);
+            let ptr = self.raw.ptr.offset(self.raw.used as isize);
+            self.raw.used += layout.size();
 
-            if ptr.is_null() {
-                std::alloc::handle_alloc_error(layout);
-            }
+            // if ptr.is_null() {
+            //     std::alloc::handle_alloc_error(layout);
+            // }
 
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
@@ -160,9 +173,9 @@ impl Heap {
         )
     }
 
-    pub fn allocate_chars(string: &str) -> *mut ArrayHeader {
+    pub fn allocate_chars(&mut self, string: &str) -> *mut ArrayHeader {
         unsafe {
-            let header = Self::allocate_array(InternArrayType::Char, string.len());
+            let header = self.allocate_array(InternArrayType::Char, string.len());
 
             let (arr_header, arr_body) = Self::get_array::<u8>(header as *mut u8);
 

@@ -1,26 +1,24 @@
-use crate::vm::class::{Class, FieldDescriptor, MethodDescriptor, AccessFlags, RefInfoType, Method, MethodReturnType, ArrayType, ClassError, ParseError};
+use crate::vm::class::{Class, FieldDescriptor, MethodDescriptor, AccessFlags, RefInfoType, Method, MethodReturnType, ClassError, ParseError};
 use std::collections::HashMap;
 use crate::vm::linker::loader::{load_class, ClassLoader, are_classpaths_siblings, ClassLoadState, DeserializationError};
-use std::{fs, mem};
+
 use std::path::{PathBuf};
-use std::ops::{Deref};
+
 use crate::vm::class::attribute::{AttributeItem};
 use crate::vm::class::BaseType;
 use std::rc::Rc;
-use std::cell::{RefCell, RefMut};
+use std::cell::{RefCell};
 use std::io::{Cursor, Error};
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::vm::class::constant::Constant;
-use std::alloc::{Layout, dealloc};
-use std::alloc::alloc;
+
+
 use std::mem::size_of;
-use core::ptr;
+
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::iter::FromIterator;
-use crate::vm::heap::{Heap, InternArrayType, Type, Reference, Object};
-use std::sync::Mutex;
-use std::option::NoneError;
-use crate::vm::vm::bytecode::Bytecode;
+
+use crate::vm::heap::{Heap, InternArrayType, Type, Reference};
+
 
 static mut BENCHMARKS: u16 = 0;
 
@@ -41,7 +39,7 @@ impl VirtualMachine {
             start_time: SystemTime::now(),
 
             class_loader: Rc::new(RefCell::new(ClassLoader::new(classpath_root))),
-            heap: Rc::new(RefCell::new(Heap::new()))
+            heap: Rc::new(RefCell::new(Heap::new(1024 * 1024 * 1024)))
         }
     }
 
@@ -58,7 +56,7 @@ impl VirtualMachine {
 
         let mut index: u16 = 0;
 
-        let string_arr_ptr = Heap::allocate_array(InternArrayType::ClassReference, args.len());
+        let string_arr_ptr = self.heap.borrow_mut().allocate_array(InternArrayType::ClassReference, args.len());
 
         let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
 
@@ -217,7 +215,9 @@ pub enum JvmError {
     ClassDeserializeError(DeserializationError),
     EmptyFrameStack,
     ParseError(ParseError),
-    NoneError
+    EmptyOperandStack,
+    InvalidLocalVariable
+    // NoneError
 }
 
 impl From<std::io::Error> for JvmError {
@@ -238,11 +238,11 @@ impl From<ClassLoadState> for JvmError {
     }
 }
 
-impl From<NoneError> for JvmError {
-    fn from(_: NoneError) -> Self {
-        Self::NoneError
-    }
-}
+// impl From<NoneError> for JvmError {
+//     fn from(_: NoneError) -> Self {
+//         Self::NoneError
+//     }
+// }
 
 impl From<ParseError> for JvmError {
     fn from(p: ParseError) -> Self {
@@ -306,7 +306,7 @@ impl RuntimeThread {
         let opcode = frame.code.read_u8()?;
         
         let mut heap = self.heap.borrow_mut();
-        let classloader = self.classloader.borrow();
+        let mut classloader = self.classloader.borrow_mut();
 
         match opcode {
             0x0 => (), //nop, do nothing
@@ -326,14 +326,14 @@ impl RuntimeThread {
             //ldc
             0x12 => { //ldc (load constant)
                 let index = frame.code.read_u8()?;
-                let constant = frame.class.constant_pool.get(index as usize)?;
+                let constant = frame.class.constant_pool.get(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
                 match constant {
                     Constant::Integer(int) => frame.op_stack.push(Operand(OperandType::Int, *int as usize)),
                     Constant::Float(float) => frame.op_stack.push(Operand(OperandType::Float, *float as usize)),
                     Constant::String(str_index) => {
                         if let Constant::Utf8(string) = frame.class.constant_pool.get(*str_index as usize)? {
-                            let allocated_string = heap.create_string(string, classloader.get_class("java/lang/String")?);
+                            let allocated_string = heap.create_string(string, classloader.get_class("java/lang/String").ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
                             frame.op_stack.push(Operand(OperandType::ClassReference, allocated_string as usize));
                         }
@@ -353,7 +353,7 @@ impl RuntimeThread {
             }
             ////iload_<n> ; Load int from local variables
             0x1a..=0x1d => {
-                let local_var = frame.local_vars.get(&((opcode - 0x1a) as u16))?;
+                let local_var = frame.local_vars.get(&((opcode - 0x1a) as u16)).ok_or(JvmError::InvalidLocalVariable)?;
 
                 if let Type::Int(int) = local_var { //<n> = 0..3
                     frame.op_stack.push(Operand(OperandType::Int, *int as usize))
@@ -361,8 +361,8 @@ impl RuntimeThread {
             },
             //lload_<n> ; Load long from local variables
             0x1e..=0x21 => {
-                if let Type::LongHalf(lhalf1) = frame.local_vars.get(&((opcode-0x1e) as u16))? { //<n> = 0..3
-                    if let Type::LongHalf(lhalf2) = frame.local_vars.get(&((opcode-0x1e) as u16 + 1))? { //<n> = 0..3
+                if let Type::LongHalf(lhalf1) = frame.local_vars.get(&((opcode-0x1e) as u16)).ok_or(JvmError::InvalidLocalVariable)? { //<n> = 0..3
+                    if let Type::LongHalf(lhalf2) = frame.local_vars.get(&((opcode-0x1e) as u16 + 1)).ok_or(JvmError::InvalidLocalVariable)? { //<n> = 0..3
                         frame.op_stack.push(Operand(OperandType::Long, *lhalf1 as usize));
                         frame.op_stack.push(Operand(OperandType::Long, *lhalf2 as usize));
                     } else { panic!("lload_n command did not resolve to a long!") }
@@ -370,14 +370,14 @@ impl RuntimeThread {
             },
             //fload_<n> ; Load float from local variables
             0x22..=0x25 => {
-                if let Type::Float(float) = frame.local_vars.get(&((opcode-0x22) as u16))? { //<n> = 0..3
+                if let Type::Float(float) = frame.local_vars.get(&((opcode-0x22) as u16)).ok_or(JvmError::InvalidLocalVariable)? { //<n> = 0..3
                     frame.op_stack.push(Operand(OperandType::Float, *float as usize));
                 } else { panic!("fload_n command did not resolve to an float!") }
             },
             //dload_<n> ; Load double from local variables
             0x26..=0x29 => {
-                if let Type::DoubleHalf(dhalf1) = frame.local_vars.get(&((opcode-0x26) as u16))? { //<n> = 0..3
-                    if let Type::DoubleHalf(dhalf2) = frame.local_vars.get(&((opcode-0x1e) as u16 + 1))? { //<n> = 0..3
+                if let Type::DoubleHalf(dhalf1) = frame.local_vars.get(&((opcode-0x26) as u16)).ok_or(JvmError::InvalidLocalVariable)? { //<n> = 0..3
+                    if let Type::DoubleHalf(dhalf2) = frame.local_vars.get(&((opcode-0x1e) as u16 + 1)).ok_or(JvmError::InvalidLocalVariable)? { //<n> = 0..3
                         frame.op_stack.push(Operand(OperandType::Double, *dhalf1 as usize));
                         frame.op_stack.push(Operand(OperandType::Double, *dhalf2 as usize));
                     } else { panic!("dload_n command did not resolve to a double!") }
@@ -403,8 +403,8 @@ impl RuntimeThread {
                 } else { panic!("aload_<n> local variable did not resolve to a reference!") };
             },
             0x30 => { //lconst_f
-                let arr_ptr = frame.op_stack.pop()?.1 as *mut u8;
-                let index = frame.op_stack.pop()?.1 as usize;
+                let arr_ptr = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as *mut u8;
+                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as usize;
 
                 unsafe {
                     let float = (arr_ptr.offset((size_of::<f32>() * index) as isize)) as *mut f32;
@@ -412,8 +412,8 @@ impl RuntimeThread {
                 }
             },
             0x31 => { //lconst_d
-                let arr_ptr = frame.op_stack.pop()?.1 as *mut u8;
-                let index = frame.op_stack.pop()?.1 as usize;
+                let arr_ptr = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as *mut u8;
+                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as usize;
 
                 unsafe {
                     let double = *((arr_ptr.offset((size_of::<u64>() * index) as isize)) as *mut u64);
@@ -426,8 +426,8 @@ impl RuntimeThread {
                 }
             },
             0x32 => { //aaload (load reference from an array)
-                let index = frame.op_stack.pop()?.1 as isize;
-                let arr_ptr = frame.op_stack.pop()?.1 as *mut u8;
+                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as isize;
+                let arr_ptr = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as *mut u8;
 
                 let (header, body) = unsafe { Heap::get_array::<usize>(arr_ptr) };
 
@@ -448,8 +448,8 @@ impl RuntimeThread {
             },
             //caload
             0x34 => {
-                let index = frame.op_stack.pop()?;
-                let arrayref = frame.op_stack.pop()?;
+                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let arrayref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
 
@@ -459,13 +459,13 @@ impl RuntimeThread {
             //istore_<n>
             0x3b..=0x3e => {
                 let index = (opcode - 0x3b) as u16;
-                let value = frame.op_stack.pop()?.1 as i32;
+                let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as i32;
                 frame.local_vars.insert(index, vec![Type::Int(value)]);
             },
             //lstore_<n>
             0x3f..=0x42 => {
                 let index = (opcode - 0x3f) as u16;
-                let long = frame.op_stack.pop()?.1;
+                let long = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
                 frame.local_vars.insert(index, vec![
                     Type::LongHalf((long >> 32) as u32),
                     Type::LongHalf((long & 0x7fffffff) as u32)
@@ -475,15 +475,15 @@ impl RuntimeThread {
             0x4b..=0x4e => {
                 let index = opcode-0x4b;
 
-                let object_ref = frame.op_stack.pop()?;
+                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 frame.local_vars.insert(index as u16, Operand::as_type(object_ref));
             },
             //castore
             0x55 => {
-                let val = frame.op_stack.pop()?;
-                let index = frame.op_stack.pop()?;
-                let arrayref = frame.op_stack.pop()?;
+                let val = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let arrayref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
 
@@ -496,20 +496,20 @@ impl RuntimeThread {
                 frame.op_stack.pop();
             },
             0x58 => {
-                let first = frame.op_stack.pop()?;
+                let first = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 if first.get_category() == 1 {
                     frame.op_stack.pop();
                 }
             },
             //dup
             0x59 => {
-                let op = frame.op_stack.pop()?;
+                let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 frame.op_stack.push(op.clone());
                 frame.op_stack.push(op);
             }
             0x60 => {
-                let int1 = frame.op_stack.pop()?.1 as i32;
-                let int2 = frame.op_stack.pop()?.1 as i32;
+                let int1 = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as i32;
+                let int2 = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as i32;
 
                 frame.op_stack.push(Operand(OperandType::Int,(int1 + int2) as usize));
             },
@@ -531,7 +531,7 @@ impl RuntimeThread {
             },
             0x99..=0x9e => {
                 let offset = frame.code.read_u16::<BigEndian>()?- 2;
-                let val = frame.op_stack.pop()?.1 as i32;
+                let val = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as i32;
 
                 if match opcode {
                     0x99 => val == 0, //ifeq
@@ -549,8 +549,8 @@ impl RuntimeThread {
                 let offset = frame.code.read_u16::<BigEndian>()? - 3; //Subtract the two bytes read and the opcode
                 //Subtract two because the offset will be used relative to the opcode, not the last byte.
 
-                let i2 = frame.op_stack.pop()?.1 as u32;
-                let i1 = frame.op_stack.pop()?.1 as u32;
+                let i2 = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as u32;
+                let i1 = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as u32;
 
                 let branch = match opcode {
                     0x9f => i1 == i2, //if_icmpeq
@@ -572,20 +572,20 @@ impl RuntimeThread {
             },
             //ireturn
             0xac => {
-                let op = frame.op_stack.pop()?;
-                self.stack.pop();
-                let invoker = self.stack.last_mut()?;
+                let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                self.stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let invoker = self.stack.last_mut().ok_or(JvmError::EmptyOperandStack)?;
                 invoker.op_stack.push(op);
             },
             //areturn
             0xb0 => {
-                let op = frame.op_stack.pop()?;
-                self.stack.pop();
-                let invoker = self.stack.last_mut()?;
+                let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                self.stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let invoker = self.stack.last_mut().ok_or(JvmError::EmptyOperandStack)?;
                 invoker.op_stack.push(op);
             },
             0xb1 => { //return void
-                self.stack.pop();
+
             },
             //getfield
             0xb4 => {
@@ -595,9 +595,9 @@ impl RuntimeThread {
 
                 let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
 
-                let class = classloader.get_class(&fieldref.class_name)?;
+                let class = classloader.get_class(&fieldref.class_name).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;;
 
-                let object_ref = frame.op_stack.pop()?.1;
+                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
                 let value = self.heap.borrow().get_field::<usize>(object_ref, class, &fieldref.name);
                 let fd = FieldDescriptor::parse(&fieldref.descriptor)?;
@@ -606,7 +606,7 @@ impl RuntimeThread {
                     FieldDescriptor::BaseType(base_type) => {
                         Operand(OperandType::from_base_type(base_type), unsafe { *value } )
                     },
-                    FieldDescriptor::ObjectType(object_type) => {
+                    FieldDescriptor::ObjectType(_object_type) => {
                         Operand(OperandType::ClassReference, unsafe { *value })
                     },
                     FieldDescriptor::ArrayType(_) => panic!("Not allowed.")
@@ -620,18 +620,18 @@ impl RuntimeThread {
 
                 let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
 
-                let class = classloader.get_class(&fieldref.class_name);
+                let class = classloader.get_class(&fieldref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::Unloaded))?;
 
-                let value = frame.op_stack.pop()?;
-                let object_ref = frame.op_stack.pop()?.1;
+                let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                heap.put_field(object_ref, class?, &fieldref.name, value.1);
+                heap.put_field(object_ref, class, &fieldref.name, value.1);
             },
             //invokevirtual
             0xb6 => {
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
                 let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor)?;
 
@@ -642,8 +642,8 @@ impl RuntimeThread {
                 println!("Parameter count: {}", &param_len);
 
                 for i in 0..param_len {
-                    let param = frame.op_stack.pop()?;
-                    let descriptor = method_descriptor.parameters.get(i)?;
+                    let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                    let descriptor = method_descriptor.parameters.get(i).ok_or(JvmError::EmptyOperandStack)?;
 
                     if !descriptor.matches_operand(param.0.clone()) {
                         panic!("Operand did not match parameter requirements.");
@@ -655,13 +655,13 @@ impl RuntimeThread {
                     );
                 }
 
-                let object_ref = frame.op_stack.pop()?;
+                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 let object_info = heap.objects.get(object_ref.1)?;
 
                 if method_ref.info_type != RefInfoType::MethodRef { panic!("Invokevirtual must reference a MethodRef!"); }
                 if method_ref.name == "<init>" || method_ref.name == "<clinit>" { panic!("Invokevirtual must not invoke an initialization method!"); }
 
-                let class = classloader.get_class(&method_ref.class_name)?;
+                let class = classloader.get_class(&method_ref.class_name).ok_or(JvmError::EmptyOperandStack)?;
                 let method = class.get_method(&method_ref.name, &method_ref.descriptor)?;
 
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor)?;
@@ -678,20 +678,18 @@ impl RuntimeThread {
                 // }
 
                 //Is polymorphic
+                //There has to be a better way to do this
                 let polymorphic: bool = {
-                    if class.this_class == "java/lang/invoke/MethodHandle" {
-
-                        if method_descriptor.parameters.len() == 1 {
-                            if let FieldDescriptor::ArrayType(at) = method_descriptor.parameters.first()? {
-                                if at.dimensions == 1 {
-                                    if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
-                                        if ot == "java/lang/Object" {
-                                            if let MethodReturnType::FieldDescriptor(return_fd) = method_descriptor.return_type {
-                                                if let FieldDescriptor::ObjectType(return_ot) = return_fd {
-                                                    if return_ot == "java/lang/Object" {
-                                                        if method.access_flags & 0x180 == 0x180 { //NATIVE | VARARGS == 0x180
-                                                            true
-                                                        } else { false }
+                    if class.this_class == "java/lang/invoke/MethodHandle" && method_descriptor.parameters.len() == 1 {
+                        if let FieldDescriptor::ArrayType(at) = method_descriptor.parameters.first()? {
+                            if at.dimensions == 1 {
+                                if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
+                                    if ot == "java/lang/Object" {
+                                        if let MethodReturnType::FieldDescriptor(return_fd) = method_descriptor.return_type {
+                                            if let FieldDescriptor::ObjectType(return_ot) = return_fd {
+                                                if return_ot == "java/lang/Object" {
+                                                    if method.access_flags & 0x180 == 0x180 { //NATIVE | VARARGS == 0x180
+                                                        true
                                                     } else { false }
                                                 } else { false }
                                             } else { false }
@@ -709,7 +707,7 @@ impl RuntimeThread {
                         object_info.class.clone(),
                         &method.name,
                         &method.descriptor
-                    ).expect("Could not resolve method!");
+                    ).ok_or(JvmError::ResolveMethodError)?;
 
                     let mut new_frame = RuntimeThread::create_frame(
                         method_to_invoke,
@@ -743,7 +741,7 @@ impl RuntimeThread {
 
                 // println!("{}", method_d);
 
-                let method_class = classloader.get_class(&method_ref.class_name)?;
+                let method_class = classloader.get_class(&method_ref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::Unloaded))?;
                 let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor)?;
                 let to_invoke: (Rc<Class>, Rc<Method>);
 
@@ -806,7 +804,7 @@ impl RuntimeThread {
 
                 let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
 
-                let class = classloader.get_class(method_ref.class_name.as_str())?; //Load the class if it isn't already loaded
+                let (just_loaded, class) = classloader.load_and_link_class(method_ref.class_name.as_str())?; //Load the class if it isn't already loaded
 
                 let md = MethodDescriptor::parse(method_ref.descriptor.as_str())?;
                 let method = class.get_method(method_ref.name.as_str(), method_ref.descriptor.as_str())?;
@@ -891,7 +889,7 @@ impl RuntimeThread {
                             frame.op_stack.push(x.clone());
                         }
                     }
-                } else if !*class.static_been_seen.read().unwrap() {
+                } else if just_loaded {
                     let mut new_frame = RuntimeThread::create_frame(
                         class.get_method("<init>", "()V")?,
                         class.clone()
@@ -935,7 +933,7 @@ impl RuntimeThread {
             0xbb => {
                 let index = frame.code.read_u16::<BigEndian>()?;
                 let classpath = frame.class.constant_pool.resolve_class_info(index)?;
-                let class = classloader.get_class(classpath)?;
+                let (just_loaded, class) = classloader.load_and_link_class(classpath)?;
 
                 //TODO: there's probably some type checking and rules that need to be followed here
 
@@ -943,12 +941,7 @@ impl RuntimeThread {
 
                 //Because of how pending_frames adds frames to the stack, you put it in the reverse order, so the top would end up being at the end of the vec.
 
-                if !*class.static_been_seen.read().unwrap() && class.field_map.contains_key("<clinit>") { //Just loaded, we need to run <clinit>
-                    {
-                        let mut seen = class.static_been_seen.write().unwrap();
-                        *seen = true;
-                    }
-
+                if just_loaded && class.field_map.contains_key("<clinit>") { //Just loaded, we need to run <clinit>
                     pending_frames = Option::Some(vec![
                         RuntimeThread::create_frame(
                             class.get_method("<clinit>", "()V")?,
@@ -976,7 +969,7 @@ impl RuntimeThread {
                     _ => unreachable!("Array atype must be between 4 & 11!")
                 };
 
-                let ptr = Heap::allocate_array(iat, length.1);
+                let ptr = self.heap.borrow_mut().allocate_array(iat, length.1);
                 frame.op_stack.push(Operand(OperandType::ArrayReference, ptr as usize));
             },
             //Breakpoint
@@ -1007,9 +1000,6 @@ impl RuntimeThread {
 pub mod bytecode {
     use std::io::{Cursor, Seek, SeekFrom, Error};
     use byteorder::{ReadBytesExt, BigEndian};
-    use crate::vm::linker::loader::DeserializationError;
-    use std::rc::Rc;
-    use num_enum::IntoPrimitive;
 
     #[derive(Debug)]
     pub enum BytecodeDeserializeError {
@@ -1031,6 +1021,7 @@ pub mod bytecode {
     #[allow(non_camel_case_types)]
     #[derive(Clone, Debug)]
     #[repr(u8)]
+    ///Enum representing each Java bytecode with the operands as the variant tuple
     pub enum Bytecode {
         Aaload, //0x32
         Aastore, //0x53
@@ -1178,7 +1169,7 @@ pub mod bytecode {
         Lxor, //0x83
         Monitorenter, //0xc2
         Monitorexit, //0xc3
-        Multianewarray, //0xc5
+        Multianewarray(u16, u8), //0xc5
         New(u16), //0xbb
         Newarray(u8), //0xbc
         Nop, //0x0
@@ -1400,10 +1391,10 @@ pub mod bytecode {
 
                         cursor.seek(SeekFrom::Current(pad as i64));
 
-                        let default = cursor.read_i32::<BigEndian>()?;
+                        let _default = cursor.read_i32::<BigEndian>()?;
                         let npairs = cursor.read_i32::<BigEndian>()?;
 
-                        (0..npairs).map(|x| {
+                        (0..npairs).map(|_x| {
                             LookupEntry {
                                 lookup_match: cursor.read_i32::<BigEndian>().unwrap(),
                                 offset: cursor.read_i32::<BigEndian>().unwrap()
@@ -1422,7 +1413,7 @@ pub mod bytecode {
                     0x83 => Self::Lxor,
                     0xc2 => Self::Monitorenter,
                     0xc3 => Self::Monitorexit,
-                    0xc5 => Self::Multianewarray,
+                    0xc5 => Self::Multianewarray(cursor.read_u16::<BigEndian>()?, cursor.read_u8()?),
                     0xbb => Self::New(cursor.read_u16::<BigEndian>()?),
                     0xbc => Self::Newarray(cursor.read_u8()?),
                     0x0 => Self::Nop,
@@ -1448,5 +1439,173 @@ pub mod bytecode {
         pub fn from_bytes(pos: u64, bytes: &[u8]) -> Result<Vec<Self>, BytecodeDeserializeError> {
             Ok(Self::from_bytes_with_indices(pos, bytes)?.into_iter().map(|(bytecode, _)| bytecode).collect())
         }
+    }
+
+    pub fn bytecode_to_bytes<'a, T: IntoIterator<Item=&'a Bytecode>>(instrs: T) -> Vec<u8> {
+        instrs.into_iter().map(|instruction| {
+            match instruction {
+                Bytecode::Aaload => vec![ 0x32 ],
+                Bytecode::Aastore => vec![ 0x53 ],
+                Bytecode::Aconst_null => vec![ 0x1 ],
+                Bytecode::Aload(byte) => vec![ 0x19, *byte ],
+                Bytecode::Aload_n(byte) => vec![ 0x2a+*byte ],
+                Bytecode::Anewarray(bytes) => vec![0xbd, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Areturn => vec![ 0xb0 ],
+                Bytecode::Arraylength => vec![ 0xbe ],
+                Bytecode::Astore(byte) => vec![ 0x3a, *byte ],
+                Bytecode::Astore_n(byte) => vec![ 0x4b + *byte ],
+                Bytecode::Athrow => vec![ 0xbf ],
+                Bytecode::Baload => vec![ 0x33 ],
+                Bytecode::Bastore => vec![ 0x54 ],
+                Bytecode::Bipush(byte) => vec![ 0x10, *byte ],
+                Bytecode::Caload => vec![ 0x34 ],
+                Bytecode::Castore => vec![ 0x55 ],
+                Bytecode::Checkcast(bytes) => vec![ 0xc0, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::D2f => vec![ 0x90 ],
+                Bytecode::D2i => vec![ 0x8e ],
+                Bytecode::D2l => vec![ 0x8f ],
+                Bytecode::Dadd => vec![ 0x63 ],
+                Bytecode::Daload => vec![ 0x31 ],
+                Bytecode::Dastore => vec![ 0x52 ],
+                Bytecode::Dcmpg => vec![ 0x98 ],
+                Bytecode::Dcmpl => vec![ 0x97 ],
+                Bytecode::Dconst_n(byte) => vec![ 0xe + *byte ],
+                Bytecode::Ddiv => vec![ 0x6f ],
+                Bytecode::Dload(byte) => vec![ 0x18, *byte ],
+                Bytecode::Dload_n(byte) => vec![ 0x26 + *byte ],
+                Bytecode::Dmul => vec![ 0x6b ],
+                Bytecode::Dneg => vec![ 0x77 ],
+                Bytecode::Drem => vec![ 0x73 ],
+                Bytecode::Dreturn => vec![ 0xaf ],
+                Bytecode::Dstore(byte) => vec![ 0x39, *byte ],
+                Bytecode::Dstore_n(byte) => vec![ 0x47 + *byte ],
+                Bytecode::Dsub => vec![ 0x67 ],
+                Bytecode::Dup => vec![ 0x59 ],
+                Bytecode::Dup_x2 => vec![ 0x5b ],
+                Bytecode::Dup2 => vec![ 0x5c ],
+                Bytecode::Dup2_x1 => vec![ 0x5d ],
+                Bytecode::Dup2_x2 => vec![ 0x5e ],
+                Bytecode::F2d => vec![ 0x8d ],
+                Bytecode::F2i => vec![ 0x8b ],
+                Bytecode::F2l => vec![ 0x8c ],
+                Bytecode::Fadd => vec![ 0x62 ],
+                Bytecode::Faload => vec![ 0x30 ],
+                Bytecode::Fastore => vec![ 0x51 ],
+                Bytecode::Fcmpg => vec![ 0x96 ],
+                Bytecode::Fcmpl => vec![ 0x95 ],
+                Bytecode::Fconst_n(byte) => vec![ 0xb + *byte ],
+                Bytecode::Fdiv => vec![ 0x6e ],
+                Bytecode::Fload(byte) => vec![ 0x17, *byte ],
+                Bytecode::Fload_n(byte) => vec![ 0x22 + *byte ],
+                Bytecode::Fmul => vec![ 0x6a ],
+                Bytecode::Fneg => vec![ 0x76 ],
+                Bytecode::Frem => vec![ 0x72 ],
+                Bytecode::Freturn => vec![ 0xae ],
+                Bytecode::Fstore(byte) => vec![ 0x38, *byte ],
+                Bytecode::Fstore_n(byte) => vec![ 0x43 + *byte ],
+                Bytecode::Fsub => vec![ 0x66 ],
+                Bytecode::Getfield(bytes) => vec![ 0xb4, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Getstatic(bytes) => vec![ 0xb2, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Goto(bytes) => vec![ 0xa7, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Goto_w(bytes) => vec![ 0xc8, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1], bytes.to_be_bytes()[2], bytes.to_be_bytes()[3] ],
+                Bytecode::I2b => vec![ 0x91 ],
+                Bytecode::I2c => vec![ 0x92 ],
+                Bytecode::I2d => vec![ 0x87 ],
+                Bytecode::I2f => vec![ 0x86 ],
+                Bytecode::I2l => vec![ 0x85 ],
+                Bytecode::I2s => vec![ 0x93 ],
+                Bytecode::Iadd => vec![ 0x60 ],
+                Bytecode::Iaload => vec![ 0x2e ],
+                Bytecode::Iand => vec![ 0x7e ],
+                Bytecode::Iastore => vec![ 0x4f ],
+                Bytecode::Iconst_n_m1(byte) => vec![ 0x2 + (*byte) as u8 ],
+                Bytecode::Idiv => vec![ 0x6c ],
+                Bytecode::If_acmpeq(bytes) => vec![ 0xa5, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_acmpne(bytes) => vec![ 0xa6, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmpeq(bytes) => vec![ 0x9f, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmpne(bytes) => vec![ 0xa0, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmplt(bytes) => vec![ 0xa1, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmpge(bytes) => vec![ 0xa2, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmpgt(bytes) => vec![ 0xa3, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::If_icmple(bytes) => vec![ 0xa4, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifeq(bytes) => vec![ 0x99, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifne(bytes) => vec![ 0x9a, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Iflt(bytes) => vec![ 0x9b, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifge(bytes) => vec![ 0x9c, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifgt(bytes) => vec![ 0x9d, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifle(bytes) => vec![ 0x9e, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifnonnull(bytes) => vec![ 0xc7, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ifnull(bytes) => vec![ 0xc6, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Iinc(byte1, byte2) => vec![ 0x84, *byte1, (*byte2) as u8 ],
+                Bytecode::Iload(byte) => vec![ 0x15, *byte ],
+                Bytecode::Iload_n(byte) => vec![ 0x1a + *byte ],
+                Bytecode::Imul => vec![ 0x68 ],
+                Bytecode::Ineg => vec![ 0x74 ],
+                Bytecode::Instanceof(bytes) => vec![ 0xc1 ],
+                Bytecode::Invokedynamic(bytes) => vec![ 0xba ],
+                Bytecode::Invokeinterface(bytes, byte) => vec![ 0xb9, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1], *byte ],
+                Bytecode::Invokespecial(bytes) => vec![ 0xb7 ],
+                Bytecode::Invokestatic(bytes) => vec![ 0xb8 ],
+                Bytecode::Invokevirtual(bytes) => vec![ 0xb6 ],
+                Bytecode::Ior => vec![ 0x80 ],
+                Bytecode::Irem => vec![ 0x70 ],
+                Bytecode::Ireturn => vec![ 0xac ],
+                Bytecode::Ishl => vec![ 0x78 ],
+                Bytecode::Ishr => vec![ 0x7a ],
+                Bytecode::Istore(byte) => vec![ 0x36, *byte ],
+                Bytecode::Istore_n(byte) => vec![ 0x3b + *byte ],
+                Bytecode::Isub => vec![ 0x64 ],
+                Bytecode::Iushr => vec![ 0x7c ],
+                Bytecode::Ixor => vec![ 0x82 ],
+                Bytecode::Jsr(bytes) => vec![ 0xa8, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Jsr_w(bytes) => vec![ 0xc9, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1], bytes.to_be_bytes()[2], bytes.to_be_bytes()[3] ],
+                Bytecode::L2d => vec![ 0x8a ],
+                Bytecode::L2f => vec![ 0x89 ],
+                Bytecode::L2i => vec![ 0x88 ],
+                Bytecode::Ladd => vec![ 0x61 ],
+                Bytecode::Laload => vec![ 0x2f ],
+                Bytecode::Land => vec![ 0x7f ],
+                Bytecode::Lastore => vec![ 0x50 ],
+                Bytecode::Lcmp => vec![ 0x94 ],
+                Bytecode::Lconst_n(byte) => vec![ 0x9 + *byte ],
+                Bytecode::Ldc(byte) => vec![ 0x12, *byte ],
+                Bytecode::Ldc_w(bytes) => vec![ 0x13, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ldc2_w(bytes) => vec![ 0x14, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Ldiv => vec![ 0x6d ],
+                Bytecode::Lload(byte) => vec![ 0x16, *byte ],
+                Bytecode::Lload_n(byte) => vec![ 0x1e + *byte ],
+                Bytecode::Lmul => vec![ 0x69 ],
+                Bytecode::Lneg => vec![ 0x75 ],
+                Bytecode::Lookupswitch(_, _) => unimplemented!(), //TODO
+                Bytecode::Lor => vec![ 0x81 ],
+                Bytecode::Lrem => vec![ 0x71 ],
+                Bytecode::Lreturn => vec![ 0xad ],
+                Bytecode::Lshl => vec![ 0x79 ],
+                Bytecode::Lshr => vec![ 0x7b ],
+                Bytecode::Lstore => vec![ 0x37 ],
+                Bytecode::Lstore_n(byte) => vec![ 0x3f + *byte ],
+                Bytecode::Lsub => vec![ 0x65 ],
+                Bytecode::Lushr => vec![ 0x7d ],
+                Bytecode::Lxor => vec![ 0x83 ],
+                Bytecode::Monitorenter => vec![ 0xc2 ],
+                Bytecode::Monitorexit => vec![ 0xc3 ],
+                Bytecode::Multianewarray(index, byte) => vec![ 0xc5 ],
+                Bytecode::New(bytes) => vec![ 0xbb, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Newarray(byte) => vec![ 0xbc, *byte ],
+                Bytecode::Nop => vec![ 0x0 ],
+                Bytecode::Pop => vec![ 0x57 ],
+                Bytecode::Pop2 => vec![ 0x58 ],
+                Bytecode::Putfield(bytes) => vec![ 0xb5, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Putstatic => vec![ 0xb3 ],
+                Bytecode::Ret => vec![ 0xa9 ],
+                Bytecode::Return => vec![ 0xb1 ],
+                Bytecode::Saload => vec![ 0x35 ],
+                Bytecode::Sastore => vec![ 0x56 ],
+                Bytecode::Sipush(bytes) => vec![ 0x11, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1] ],
+                Bytecode::Swap => vec![ 0x5f ],
+                Bytecode::Tableswitch => vec![ 0xaa ],
+                Bytecode::Wide(_) => unimplemented!()
+            }
+        }).flatten().collect()
     }
 }

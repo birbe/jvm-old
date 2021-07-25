@@ -24,7 +24,7 @@ use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value, InstrSeqId
 use std::io;
 use std::option::NoneError;
 use jvm::vm::vm::bytecode::Bytecode;
-use crate::ir::{ControlFlow, FoldedBytecode, IndexedBytecode};
+use crate::ir::{ControlFlow, Relooped, IndexedBytecode};
 use std::cell::{RefCell, RefMut};
 use std::borrow::{Borrow, BorrowMut};
 use std::ops::DerefMut;
@@ -560,7 +560,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     FunctionKind::Uninitialized(_) => unreachable!(),
                 };
 
-                let stubs: Vec<(usize, &FoldedBytecode, InstrSeqId)> = intermediate.iter().map(|folded| {
+                let stubs: Vec<(usize, &Relooped, InstrSeqId)> = intermediate.iter().map(|folded| {
                     Self::generate_block_stubs(
                         &mut builder.func_body(),
                         &folded
@@ -575,7 +575,7 @@ impl<'classloader> WasmEmitter<'classloader> {
 
                 stubs.into_iter().for_each(|(bytecode_index, folded_bytecode, block_id)| {
                     let bytecode = match folded_bytecode {
-                        FoldedBytecode::Instructions(v) => v,
+                        Relooped::Instructions(v) => v,
                         _ => unreachable!("Stubs should only ever contain the necessary instructions.")
                     };
 
@@ -655,17 +655,15 @@ impl<'classloader> WasmEmitter<'classloader> {
         jvm_locals
     }
 
-    fn fold_bytecode(&self, code: &Code, method: &Method, class: &Class) -> Vec<FoldedBytecode> {
-        ControlFlow::convert(&code.code[..]).unwrap()
+    fn fold_bytecode(&self, code: &Code, method: &Method, class: &Class) -> Vec<Relooped> {
+        ControlFlow::convert(&code.code[..], &method.name).unwrap()
     }
 
-    fn generate_block_stubs<'intermediate>(builder: &mut InstrSeqBuilder, intermediates: &'intermediate FoldedBytecode) -> Result<Vec<(usize, &'intermediate FoldedBytecode, InstrSeqId)>, CompilationError> {
-        let mut vec: Vec<(usize, &'intermediate FoldedBytecode, InstrSeqId)> = Vec::new();
-
-        println!("stub {:?}", intermediates);
+    fn generate_block_stubs<'intermediate>(builder: &mut InstrSeqBuilder, intermediates: &'intermediate Relooped) -> Result<Vec<(usize, &'intermediate Relooped, InstrSeqId)>, CompilationError> {
+        let mut vec: Vec<(usize, &'intermediate Relooped, InstrSeqId)> = Vec::new();
 
         match intermediates {
-            FoldedBytecode::Instructions(bytecode) => {
+            Relooped::Instructions(bytecode) => {
                 let first = bytecode.first();
                 match bytecode.first() {
                     None => panic!("No instructions?"),
@@ -674,7 +672,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     )
                 }
             }
-            FoldedBytecode::LoopBlock(bytecode) => {
+            Relooped::LoopBlock(bytecode) => {
                 builder.loop_(InstrSeqType::Simple(Option::None), |builder| {
                     bytecode.iter().for_each(|e| {
                         vec.extend(
@@ -685,7 +683,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     });
                 });
             }
-            FoldedBytecode::Block(bytecode) => {
+            Relooped::Block(bytecode) => {
                 builder.block(InstrSeqType::Simple(Option::None), |builder| {
                     bytecode.iter().for_each(|e| {
                         vec.extend(
@@ -696,7 +694,7 @@ impl<'classloader> WasmEmitter<'classloader> {
                     });
                 });
             }
-            FoldedBytecode::IfBlock(bytecode) => {
+            Relooped::IfBlock(bytecode) => {
                 builder.if_else(InstrSeqType::Simple(Option::None), |builder| {
                     bytecode.iter().for_each(|e| {
                         vec.extend(
@@ -919,6 +917,10 @@ impl<'classloader> WasmEmitter<'classloader> {
                 },
                 Bytecode::If_icmpne(branch) => {
                     builder.binop(BinaryOp::I32Ne);
+                    let index = (bytecode_index as isize) + (*branch as isize);
+                    let block_id = block_map.get(&(index as usize)).unwrap();
+                    builder.br_if(*block_id);
+                    println!("{} {:?}", index, block_map);
                 },
                 Bytecode::Ifne(branch) => {
                     builder.binop(BinaryOp::I32Ne);

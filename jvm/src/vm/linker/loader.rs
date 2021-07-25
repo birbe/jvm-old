@@ -5,13 +5,13 @@ use crate::vm::class::{Class, FieldInfo, Method, ObjectField, BaseType, Constant
 use crate::vm::class::attribute::{Attribute};
 use std::collections::HashMap;
 use crate::vm::class::FieldDescriptor;
-use std::mem::size_of;
+
 use std::rc::Rc;
 use std::path::PathBuf;
 use std::iter::FromIterator;
 use std::ops::{Deref};
 use std::{fs, io};
-use crate::vm::vm::OperandType::ClassReference;
+
 use std::sync::RwLock;
 use crate::vm::vm::JvmError;
 
@@ -44,6 +44,7 @@ impl From<DeserializationError> for ClassLoadState {
 
 pub struct ClassLoader {
     pub class_map: HashMap<String, ClassLoadState>,
+
     classpath_root: PathBuf
 }
 
@@ -89,14 +90,15 @@ impl ClassLoader {
     pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Rc<Class>), JvmError> {
         let maybe = self.class_map.get(classpath);
 
-        if maybe.is_some() {
-            match maybe.unwrap() {
+        match maybe {
+            Some(_) => { match maybe.unwrap() {
                 ClassLoadState::Unloaded => {}
                 ClassLoadState::Loading => return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading)),
                 ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap())),
                 ClassLoadState::DeserializationError(e) => return Result::Err(JvmError::ClassLoadError(ClassLoadState::DeserializationError(e.clone())))
-            }
-        }
+            }; },
+            None => {}
+        };
 
         let split_classpath = classpath.split("/");
         let mut physical_classpath = PathBuf::new();
@@ -440,7 +442,6 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
         method_map,
         attribute_map,
         heap_size,
-        full_heap_size: heap_size,
-        static_been_seen: Rc::new(RwLock::new(false))
+        full_heap_size: heap_size
     })
 }
