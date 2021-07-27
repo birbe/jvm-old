@@ -2,12 +2,13 @@ use std::rc::Rc;
 use crate::vm::class::{Class};
 use std::alloc::{Layout, dealloc};
 use core::mem;
-use crate::vm::vm::{Operand, OperandType};
+use crate::vm::vm::{Operand, OperandType, JvmError};
 use std::ptr;
 use std::collections::HashMap;
 use std::mem::size_of;
 
 use std::alloc::alloc;
+use std::sync::Arc;
 
 pub struct Heap {
     pub strings: HashMap<String, usize>,
@@ -33,7 +34,7 @@ impl Heap {
         }
     }
 
-    pub fn create_string(&mut self, string: &str, str_class: Rc<Class>) -> usize {
+    pub fn create_string(&mut self, string: &str, str_class: Arc<Class>) -> usize {
         if self.strings.contains_key(string) {
             return *self.strings.get(string).unwrap();
         }
@@ -65,17 +66,17 @@ impl Heap {
         }
     }
 
-    pub fn allocate_class(&mut self, class: Rc<Class>) -> *mut u8 {
+    pub fn allocate_class(&mut self, class: Arc<Class>) -> *mut u8 {
         let ptr = unsafe { self.raw.ptr.offset(self.raw.used as isize) }; //TODO: bounds check
         self.raw.used += class.full_heap_size;
         ptr as *mut u8
     }
 
-    pub fn deallocate_class(class: Rc<Class>, ptr: *mut u8) {
+    pub fn deallocate_class(class: Arc<Class>, ptr: *mut u8) {
         //...
     }
 
-    pub fn create_object(&mut self, class: Rc<Class>) -> usize {
+    pub fn create_object(&mut self, class: Arc<Class>) -> usize {
         let info = Object {
             ptr: self.allocate_class(class.clone()),
             class: class.clone()
@@ -105,7 +106,7 @@ impl Heap {
         }
     }
 
-    pub fn put_field<T>(&self, id: usize, class: Rc<Class>, field: &str, value: T) {
+    pub fn put_field<T>(&self, id: usize, class: Arc<Class>, field: &str, value: T) {
         let ptr = self.objects.get(id).unwrap().ptr;
 
         let field_offset = class.field_map.get(
@@ -121,9 +122,9 @@ impl Heap {
         }
     }
 
-    pub fn get_field<T>(&self, id: usize, class: Rc<Class>, field: &str) -> *mut T {
+    pub fn get_field<T>(&self, id: usize, class: Arc<Class>, field: &str) -> Result<*mut T, JvmError> {
         unsafe {
-            let ptr = self.objects.get(id).unwrap().ptr;
+            let ptr = self.objects.get(id).ok_or(JvmError::InvalidObjectReference)?.ptr;
 
             let offset_ptr = ptr.offset(
                 class.field_map.get(
@@ -131,7 +132,7 @@ impl Heap {
                 ).unwrap().offset as isize
             ) as *mut T;
 
-            offset_ptr
+            return Result::Ok(offset_ptr)
         }
     }
 
@@ -186,6 +187,9 @@ impl Heap {
     }
 
 }
+
+unsafe impl Send for Heap {}
+unsafe impl Sync for Heap {}
 
 pub enum InternArrayType {
     Char,
@@ -274,8 +278,8 @@ impl InternArrayType {
 }
 
 pub struct Object {
-    pub(crate) class: Rc<Class>,
-    ptr: *mut u8
+    pub class: Arc<Class>,
+    pub ptr: *mut u8
 }
 
 #[derive(Debug)]
@@ -326,3 +330,6 @@ pub enum Reference {
     Class(usize),
     Array(*mut u8)
 }
+
+unsafe impl Send for Reference {}
+unsafe impl Sync for Reference {}

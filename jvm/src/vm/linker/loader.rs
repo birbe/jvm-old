@@ -12,22 +12,22 @@ use std::iter::FromIterator;
 use std::ops::{Deref};
 use std::{fs, io};
 
-use std::sync::RwLock;
+use std::sync::{RwLock, Arc};
 use crate::vm::vm::JvmError;
 
 #[derive(Debug)]
 pub enum ClassLoadState {
-    Unloaded,
+    NotLoaded,
     Loading,
-    Loaded(Rc<Class>),
+    Loaded(Arc<Class>),
     DeserializationError(DeserializationError)
 }
 
 impl ClassLoadState {
 
-    pub fn unwrap(&self) -> Rc<Class> {
+    pub fn unwrap(&self) -> Arc<Class> {
         match self {
-            ClassLoadState::Unloaded => panic!("Cannot unwrap an unloaded class."),
+            ClassLoadState::NotLoaded => panic!("Cannot unwrap an unloaded class."),
             ClassLoadState::Loading => panic!("Cannot unwrap a class that is being loaded."),
             ClassLoadState::Loaded(class) => class.clone(),
             ClassLoadState::DeserializationError(_) => panic!("Cannot unwrap a class that failed to load.")
@@ -57,7 +57,7 @@ impl ClassLoader {
         }
     }
 
-    pub fn get_class(&self, classpath: &str) -> Option<Rc<Class>> {
+    pub fn get_class(&self, classpath: &str) -> Option<Arc<Class>> {
         Option::Some(self.class_map.get(classpath)?.unwrap())
     }
 
@@ -87,12 +87,12 @@ impl ClassLoader {
          }
     }
 
-    pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Rc<Class>), JvmError> {
+    pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Arc<Class>), JvmError> {
         let maybe = self.class_map.get(classpath);
 
         match maybe {
             Some(_) => { match maybe.unwrap() {
-                ClassLoadState::Unloaded => {}
+                ClassLoadState::NotLoaded => {}
                 ClassLoadState::Loading => return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading)),
                 ClassLoadState::Loaded(_) => return Result::Ok((false, maybe.unwrap().unwrap())),
                 ClassLoadState::DeserializationError(e) => return Result::Err(JvmError::ClassLoadError(ClassLoadState::DeserializationError(e.clone())))
@@ -167,7 +167,7 @@ impl ClassLoader {
             }
         }
 
-        self.class_map.insert(String::from(classpath), ClassLoadState::Loaded(Rc::new(class)));
+        self.class_map.insert(String::from(classpath), ClassLoadState::Loaded(Arc::new(class)));
 
         let rc = self.class_map.get(classpath).unwrap().unwrap();
 
@@ -207,7 +207,7 @@ impl ClassLoader {
         }
     }
 
-    pub fn recurse_resolve_overridding_method(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
+    pub fn recurse_resolve_overridding_method(&self, subclass: Arc<Class>, name: &str, descriptor: &str) -> Option<(Arc<Class>, Arc<Method>)> {
         let superclass = self.get_class(&subclass.super_class).unwrap();
 
         if subclass.has_method(name, descriptor) {
@@ -238,7 +238,7 @@ impl ClassLoader {
         return Option::None;
     }
 
-    pub fn recurse_resolve_supermethod_special(&self, subclass: Rc<Class>, name: &str, descriptor: &str) -> Option<(Rc<Class>, Rc<Method>)> {
+    pub fn recurse_resolve_supermethod_special(&self, subclass: Arc<Class>, name: &str, descriptor: &str) -> Option<(Arc<Class>, Arc<Method>)> {
         if subclass.super_class == "" {
             return Option::None;
         }
@@ -408,20 +408,14 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
 
     let method_count = rdr.read_u16::<BigEndian>()?;
 
-    let mut method_map: HashMap<String, HashMap<String, Rc<Method>>> = HashMap::new();
+    let mut method_map: HashMap<(String, String), Arc<Method>> = HashMap::new();
 
     for _ in 0..method_count {
         let m = Method::from_bytes(&mut rdr, &constant_pool).map_err(|_|
             DeserializationError::InvalidPayload
         )?;
 
-        if !method_map.contains_key(m.name.as_str()) {
-            method_map.insert(m.name.clone(), HashMap::new());
-        }
-
-        method_map.get_mut(m.name.clone().as_str())
-            .unwrap()
-            .insert(String::from(&m.descriptor), Rc::new(m));
+        method_map.insert((m.name.clone(), m.descriptor.clone()), Arc::new(m));
     }
 
     let attribute_count = rdr.read_u16::<BigEndian>()?;

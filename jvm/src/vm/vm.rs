@@ -18,18 +18,17 @@ use std::mem::size_of;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vm::heap::{Heap, InternArrayType, Type, Reference};
-
+use std::sync::{Arc, Mutex, TryLockError, MutexGuard, RwLock, PoisonError, RwLockWriteGuard, RwLockReadGuard};
+use std::ops::DerefMut;
+use std::borrow::BorrowMut;
 
 static mut BENCHMARKS: u16 = 0;
 
 pub struct VirtualMachine {
     pub start_time: SystemTime,
-
-    pub threads: HashMap<String, RuntimeThread>,
-
-    pub class_loader: Rc<RefCell<ClassLoader>>,
-
-    pub heap: Rc<RefCell<Heap>>,
+    pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,
+    pub class_loader: Arc<RwLock<ClassLoader>>,
+    pub heap: Arc<RwLock<Heap>>,
 }
 
 impl VirtualMachine {
@@ -38,14 +37,14 @@ impl VirtualMachine {
             threads: HashMap::new(),
             start_time: SystemTime::now(),
 
-            class_loader: Rc::new(RefCell::new(ClassLoader::new(classpath_root))),
-            heap: Rc::new(RefCell::new(Heap::new(1024 * 1024 * 1024)))
+            class_loader: Arc::new(RwLock::new(ClassLoader::new(classpath_root))),
+            heap: Arc::new(RwLock::new(Heap::new(1024 * 1024)))
         }
     }
 
-    pub fn spawn_thread(&mut self, thread_name: &str, class: &str, method_name: &str, method_descriptor: &str, args: Vec<String>) -> Result<&RuntimeThread, JvmError> {
+    pub fn spawn_thread(&mut self, thread_name: &str, class: &str, method_name: &str, method_descriptor: &str, args: Vec<String>) -> Result<Arc<RwLock<RuntimeThread>>, JvmError> {
 
-        let (_, class) = self.class_loader.borrow_mut().load_and_link_class(class)?;
+        let (_, class) = self.class_loader.write()?.load_and_link_class(class)?;
 
         let mut thread = RuntimeThread::new(String::from(thread_name), self.heap.clone(), self.class_loader.clone());
 
@@ -56,14 +55,14 @@ impl VirtualMachine {
 
         let mut index: u16 = 0;
 
-        let string_arr_ptr = self.heap.borrow_mut().allocate_array(InternArrayType::ClassReference, args.len());
+        let string_arr_ptr = self.heap.write()?.allocate_array(InternArrayType::ClassReference, args.len());
 
         let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
 
         frame.local_vars.insert(0, vec![ Type::Reference(Reference::Array(header as *mut u8)) ]);
 
         for arg in args.iter() {
-            let str = self.heap.borrow_mut().create_string(arg, self.class_loader.borrow_mut().load_and_link_class("java/lang/String")?.1);
+            let str = self.heap.write()?.create_string(arg, self.class_loader.write()?.load_and_link_class("java/lang/String")?.1);
 
             unsafe {
                 *body.offset(size_of::<usize>() as isize * index as isize) = str as usize;
@@ -76,9 +75,9 @@ impl VirtualMachine {
             frame
         );
 
-        self.threads.insert(String::from(thread_name), thread);
+        self.threads.insert(String::from(thread_name), Arc::new(RwLock::new(thread)));
 
-        Ok(self.threads.get(thread_name).unwrap())
+        Ok(self.threads.get(thread_name).unwrap().clone())
     }
 }
 
@@ -204,7 +203,18 @@ pub struct Frame {
     method_name: String,
     op_stack: Vec<Operand>,
     code: Cursor<Vec<u8>>,
-    class: Rc<Class>
+    class: Arc<Class>
+}
+
+#[derive(Debug)]
+pub enum MethodError {
+    InvalidDescriptor
+}
+
+#[derive(Debug)]
+pub enum PoisonedMutexError {
+    Classloader,
+    Heap
 }
 
 #[derive(Debug)]
@@ -216,8 +226,35 @@ pub enum JvmError {
     EmptyFrameStack,
     ParseError(ParseError),
     EmptyOperandStack,
-    InvalidLocalVariable
-    // NoneError
+    InvalidLocalVariable,
+    InvalidObjectReference,
+    MethodError(MethodError),
+    UnresolvedSuper,
+    PoisonedMutex(PoisonedMutexError)
+}
+
+impl<'a> From<PoisonError<RwLockWriteGuard<'a, ClassLoader>>> for JvmError {
+    fn from(_: PoisonError<RwLockWriteGuard<'a, ClassLoader>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Classloader)
+    }
+}
+
+impl<'a> From<PoisonError<RwLockReadGuard<'a, ClassLoader>>> for JvmError {
+    fn from(_: PoisonError<RwLockReadGuard<'a, ClassLoader>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Classloader)
+    }
+}
+
+impl<'a> From<PoisonError<RwLockWriteGuard<'a, Heap>>> for JvmError {
+    fn from(_: PoisonError<RwLockWriteGuard<'a, Heap>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Heap)
+    }
+}
+
+impl<'a> From<PoisonError<RwLockReadGuard<'a, Heap>>> for JvmError {
+    fn from(_: PoisonError<RwLockReadGuard<'a, Heap>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Heap)
+    }
 }
 
 impl From<std::io::Error> for JvmError {
@@ -257,25 +294,25 @@ impl From<DeserializationError> for JvmError {
 }
 
 pub struct RuntimeThread {
-    heap: Rc<RefCell<Heap>>,
-    classloader: Rc<RefCell<ClassLoader>>,
+    heap: Arc<RwLock<Heap>>,
+    classloader: Arc<RwLock<ClassLoader>>,
 
-    thread_name: String,
-    stack: Vec<Frame>
+    thread_name: Arc<String>,
+    frame_stack: Vec<RwLock<Frame>>
 }
 
 impl RuntimeThread {
-    pub fn new(name: String, heap: Rc<RefCell<Heap>>, classloader: Rc<RefCell<ClassLoader>>) -> RuntimeThread {
+    pub fn new(name: String, heap: Arc<RwLock<Heap>>, classloader: Arc<RwLock<ClassLoader>>) -> RuntimeThread {
         RuntimeThread {
             heap,
             classloader,
 
-            thread_name: name,
-            stack: Vec::new()
+            thread_name: Arc::new(name),
+            frame_stack: Vec::new()
         }
     }
 
-    pub fn create_frame(method: Rc<Method>, class: Rc<Class>) -> Frame {
+    pub fn create_frame(method: Arc<Method>, class: Arc<Class>) -> Frame {
         let attr = method.attribute_map.get("Code").expect("Method did not have a Code attribute! Is native?");
 
         let code_cursor= if let AttributeItem::Code(code) = &attr.info {
@@ -292,21 +329,20 @@ impl RuntimeThread {
     }
 
     pub fn add_frame(&mut self, frame: Frame) {
-        self.stack.push(frame)
+        self.frame_stack.push(RwLock::new(frame))
     }
 
     pub fn step(&mut self) -> Result<(), JvmError> {
         let mut pending_frames: Option<Vec<Frame>> = Option::None;
 
-        let frame = self.stack.last_mut().ok_or(
+        let mut frame_borrow = self.frame_stack.last().ok_or(
             JvmError::EmptyFrameStack
-        )?;
+        )?.write().unwrap();
+
+        let frame = frame_borrow.deref_mut();
 
         let opcode_pos = frame.code.position();
         let opcode = frame.code.read_u8()?;
-        
-        let mut heap = self.heap.borrow_mut();
-        let mut classloader = self.classloader.borrow_mut();
 
         match opcode {
             0x0 => (), //nop, do nothing
@@ -332,8 +368,8 @@ impl RuntimeThread {
                     Constant::Integer(int) => frame.op_stack.push(Operand(OperandType::Int, *int as usize)),
                     Constant::Float(float) => frame.op_stack.push(Operand(OperandType::Float, *float as usize)),
                     Constant::String(str_index) => {
-                        if let Constant::Utf8(string) = frame.class.constant_pool.get(*str_index as usize)? {
-                            let allocated_string = heap.create_string(string, classloader.get_class("java/lang/String").ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
+                        if let Constant::Utf8(string) = frame.class.constant_pool.get(*str_index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))? {
+                            let allocated_string = self.heap.write()?.create_string(string, self.classloader.read()?.get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?);
 
                             frame.op_stack.push(Operand(OperandType::ClassReference, allocated_string as usize));
                         }
@@ -523,7 +559,7 @@ impl RuntimeThread {
                 let index = frame.code.read_u8()?;
                 let byte = frame.code.read_u8()?;
 
-                let var = frame.local_vars.get(&(index as u16))?;
+                let var = frame.local_vars.get(&(index as u16)).ok_or(JvmError::InvalidLocalVariable)?;
                 if let Type::Int(int) = var {
                     let num = *int + byte as i32;
                     frame.local_vars.insert(byte as u16, vec![Type::Int(num)]);
@@ -573,15 +609,17 @@ impl RuntimeThread {
             //ireturn
             0xac => {
                 let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                self.stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                let invoker = self.stack.last_mut().ok_or(JvmError::EmptyOperandStack)?;
+                drop(frame_borrow);
+                self.frame_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let mut invoker = self.frame_stack.last().ok_or(JvmError::EmptyOperandStack)?.write().unwrap();
                 invoker.op_stack.push(op);
             },
             //areturn
             0xb0 => {
                 let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                self.stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                let invoker = self.stack.last_mut().ok_or(JvmError::EmptyOperandStack)?;
+                drop(frame_borrow);
+                self.frame_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let mut invoker = self.frame_stack.last().ok_or(JvmError::EmptyOperandStack)?.write().unwrap();
                 invoker.op_stack.push(op);
             },
             0xb1 => { //return void
@@ -593,13 +631,13 @@ impl RuntimeThread {
 
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
+                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let class = classloader.get_class(&fieldref.class_name).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;;
+                let class = self.classloader.read()?.get_class(&fieldref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
 
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                let value = self.heap.borrow().get_field::<usize>(object_ref, class, &fieldref.name);
+                let value = self.heap.read()?.get_field::<usize>(object_ref, class, &fieldref.name)?;
                 let fd = FieldDescriptor::parse(&fieldref.descriptor)?;
 
                 let operand = match fd {
@@ -618,14 +656,21 @@ impl RuntimeThread {
                 //TODO: type checking, exceptions
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
+                let fieldref = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let class = classloader.get_class(&fieldref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::Unloaded))?;
+                let classloader_arc = self.classloader.clone();
+                let classloader_read = classloader_arc.read()?; //Bypass the borrow checker
+
+                let class = classloader_read.get_class(&fieldref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(&fieldref.class_name).map(|class| {
+                        class.1
+                    })
+                })?;
 
                 let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                heap.put_field(object_ref, class, &fieldref.name, value.1);
+                self.heap.write()?.put_field(object_ref, class, &fieldref.name, value.1);
             },
             //invokevirtual
             0xb6 => {
@@ -656,12 +701,22 @@ impl RuntimeThread {
                 }
 
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                let object_info = heap.objects.get(object_ref.1)?;
+
+                let heap = self.heap.read()?;
+
+                let object_info = heap.objects.get(object_ref.1).ok_or(JvmError::InvalidObjectReference)?;
 
                 if method_ref.info_type != RefInfoType::MethodRef { panic!("Invokevirtual must reference a MethodRef!"); }
                 if method_ref.name == "<init>" || method_ref.name == "<clinit>" { panic!("Invokevirtual must not invoke an initialization method!"); }
 
-                let class = classloader.get_class(&method_ref.class_name).ok_or(JvmError::EmptyOperandStack)?;
+                let class = self.classloader.read()?.get_class(&method_ref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).or_else(|_| {
+                   self.classloader.write()?.load_and_link_class(&method_ref.class_name).map(|class| {
+                       class.1
+                   })
+                })?;
+                //Attempts to simply read from the classloader and get the class. If this was not
+                //possible, attempt to load the class. Otherwise, return an error.
+
                 let method = class.get_method(&method_ref.name, &method_ref.descriptor)?;
 
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor)?;
@@ -681,7 +736,7 @@ impl RuntimeThread {
                 //There has to be a better way to do this
                 let polymorphic: bool = {
                     if class.this_class == "java/lang/invoke/MethodHandle" && method_descriptor.parameters.len() == 1 {
-                        if let FieldDescriptor::ArrayType(at) = method_descriptor.parameters.first()? {
+                        if let FieldDescriptor::ArrayType(at) = method_descriptor.parameters.first().ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))? {
                             if at.dimensions == 1 {
                                 if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
                                     if ot == "java/lang/Object" {
@@ -703,11 +758,11 @@ impl RuntimeThread {
 
                 if !polymorphic {
 
-                    let (resolved_class, method_to_invoke) = classloader.recurse_resolve_overridding_method(
+                    let (resolved_class, method_to_invoke) = self.classloader.read()?.recurse_resolve_overridding_method(
                         object_info.class.clone(),
                         &method.name,
                         &method.descriptor
-                    ).ok_or(JvmError::ResolveMethodError)?;
+                    ).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
 
                     let mut new_frame = RuntimeThread::create_frame(
                         method_to_invoke,
@@ -735,29 +790,34 @@ impl RuntimeThread {
             0xb7 => {
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
                 let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor)?;
 
                 // println!("{}", method_d);
 
-                let method_class = classloader.get_class(&method_ref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::Unloaded))?;
-                let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor)?;
-                let to_invoke: (Rc<Class>, Rc<Method>);
+                let method_class = self.classloader.read()?.get_class(&method_ref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(&method_ref.class_name).map(|class| {
+                        class.1
+                    })
+                })?;
 
-                if {
+                let classloader = self.classloader.read()?;
+
+                let resolved_method = method_class.get_method(&method_ref.name, &method_ref.descriptor)?;
+                let to_invoke: (Arc<Class>, Arc<Method>) = if {
                     (method_class.access_flags & 0x20 == 0x20)
                     && classloader.recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
                     && resolved_method.name != "<init>"
                 } {
-                    to_invoke = classloader.recurse_resolve_supermethod_special(
-                       classloader.get_class(&frame.class.super_class)?,
-                       &resolved_method.name,
-                       &resolved_method.descriptor,
-                    )?;
+                    classloader.recurse_resolve_supermethod_special(
+                        classloader.get_class(&frame.class.super_class).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?,
+                        &resolved_method.name,
+                        &resolved_method.descriptor,
+                    ).ok_or(JvmError::UnresolvedSuper)?
                 } else {
-                    to_invoke = (method_class, resolved_method);
-                }
+                    (method_class, resolved_method)
+                };
 
                 let mut new_frame = RuntimeThread::create_frame(
                     to_invoke.1,
@@ -767,8 +827,8 @@ impl RuntimeThread {
                 let param_len = method_descriptor.parameters.len();
 
                 for i in 0..param_len {
-                    let param = frame.op_stack.pop()?;
-                    let descriptor = method_descriptor.parameters.get(i)?;
+                    let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                    let descriptor = method_descriptor.parameters.get(i).ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?;
 
                     if !descriptor.matches_operand(param.0.clone()) {
                         panic!("Operand did not match parameter requirements.");
@@ -781,7 +841,7 @@ impl RuntimeThread {
                 }
 
                 new_frame.local_vars.insert(0, Operand::as_type(
-                    frame.op_stack.pop()?
+                    frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?
                 )); //the objectref
 
                 pending_frames = Option::Some(vec![
@@ -802,9 +862,11 @@ impl RuntimeThread {
             0xb8 => { //invokestatic
                 let index = frame.code.read_u16::<BigEndian>()?;
 
-                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize)?;
+                let method_ref = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let (just_loaded, class) = classloader.load_and_link_class(method_ref.class_name.as_str())?; //Load the class if it isn't already loaded
+                let (just_loaded, class) = self.classloader.read()?.get_class(&method_ref.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).map(|c| (true, c)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(&method_ref.class_name)
+                })?;
 
                 let md = MethodDescriptor::parse(method_ref.descriptor.as_str())?;
                 let method = class.get_method(method_ref.name.as_str(), method_ref.descriptor.as_str())?;
@@ -812,30 +874,23 @@ impl RuntimeThread {
                 if AccessFlags::is_native(method.access_flags) { //Is native
                     let mut argument_stack: Vec<Operand> = Vec::new();
                     for _ in md.parameters.iter() {
-                        argument_stack.push({
-                            let operand = frame.op_stack.pop();
-                            if operand.is_some() {
-                                operand?
-                            } else {
-                                panic!(
-                                    format!("Attempted to pop operand stack, is empty. Bytecode {}\n Method name \"{}\"", opcode_pos, method.name)
-                                )
-                            }
-                        });
+                        argument_stack.push(
+                            frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?
+                        );
                     }
 
                     let name = &*format!("{}|{}", class.this_class, method.name);
 
                     let operands_out = match name {
                         "Main|print_int" => {
-                            println!("Main_print_int({})", argument_stack.pop()?.1);
+                            println!("Main_print_int({})", argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1);
 
                             Option::None
                         },
                         "Main|print_string" => {
-                            let string_reference = argument_stack.pop()?.1;
+                            let string_reference = argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                            let chars_ptr = heap.get_field::<usize>(string_reference, self.classloader.borrow().get_class("java/lang/String")?, "chars");
+                            let chars_ptr = self.heap.read()?.get_field::<usize>(string_reference, self.classloader.read()?.get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?, "chars")?;
                             let mut string_bytes: Vec<u8> = Vec::new();
 
                             unsafe {
@@ -866,7 +921,7 @@ impl RuntimeThread {
                         },
                         "Main|print_long" => {
                             println!("{:?}", frame.op_stack);
-                            let long = frame.op_stack.pop()?.1;
+                            let long = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
                             println!("Long: {}", long);
 
@@ -880,15 +935,14 @@ impl RuntimeThread {
                         _ => unimplemented!("Unimplemented native method \"{}\"", name)
                     };
 
-                    if operands_out.is_some() {
-                        let operands = operands_out?;
-
-                        println!("{:?}", operands);
-
-                        for x in operands.iter() {
-                            frame.op_stack.push(x.clone());
+                    match operands_out {
+                        None => {}
+                        Some(operands) => {
+                            for x in operands.into_iter() {
+                                frame.op_stack.push(x);
+                            }
                         }
-                    }
+                    };
                 } else if just_loaded {
                     let mut new_frame = RuntimeThread::create_frame(
                         class.get_method("<init>", "()V")?,
@@ -898,7 +952,7 @@ impl RuntimeThread {
                     for i in 0..md.parameters.len() {
                         new_frame.local_vars.insert(
                             i as u16,
-                            Operand::as_type(frame.op_stack.pop()?)
+                            Operand::as_type(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?)
                         );
                     }
 
@@ -920,7 +974,7 @@ impl RuntimeThread {
                             for i in 0..md.parameters.len() {
                                 new_frame.local_vars.insert(
                                     i as u16,
-                                    Operand::as_type(frame.op_stack.pop()?)
+                                    Operand::as_type(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?)
                                 );
                             }
 
@@ -932,12 +986,14 @@ impl RuntimeThread {
             //new
             0xbb => {
                 let index = frame.code.read_u16::<BigEndian>()?;
-                let classpath = frame.class.constant_pool.resolve_class_info(index)?;
-                let (just_loaded, class) = classloader.load_and_link_class(classpath)?;
+                let classpath = frame.class.constant_pool.resolve_class_info(index).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
+                let (just_loaded, class) = self.classloader.read()?.get_class(classpath).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).map(|c| (true, c)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(classpath)
+                })?;
 
                 //TODO: there's probably some type checking and rules that need to be followed here
 
-                let id = heap.create_object(class.clone());
+                let id = self.heap.write()?.create_object(class.clone());
 
                 //Because of how pending_frames adds frames to the stack, you put it in the reverse order, so the top would end up being at the end of the vec.
 
@@ -955,7 +1011,7 @@ impl RuntimeThread {
             0xbc => {
                 let atype = frame.code.read_u8()?;
 
-                let length = frame.op_stack.pop()?;
+                let length = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 let iat: InternArrayType = match atype {
                     4 => InternArrayType::Int,
@@ -969,7 +1025,7 @@ impl RuntimeThread {
                     _ => unreachable!("Array atype must be between 4 & 11!")
                 };
 
-                let ptr = self.heap.borrow_mut().allocate_array(iat, length.1);
+                let ptr = self.heap.write()?.allocate_array(iat, length.1);
                 frame.op_stack.push(Operand(OperandType::ArrayReference, ptr as usize));
             },
             //Breakpoint
@@ -981,18 +1037,11 @@ impl RuntimeThread {
             }
         }
 
-        if pending_frames.is_some() {
-            let mut frames = pending_frames?;
-            for _ in 0..frames.len() {
-                self.stack.push(frames.pop()?);
-            }
-        }
-
         Result::Ok(())
     }
 
     pub fn get_stack_count(&self) -> usize {
-        self.stack.len()
+        self.frame_stack.len()
     }
 
 }
