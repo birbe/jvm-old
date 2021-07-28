@@ -76,7 +76,7 @@ impl VirtualMachine {
             vec![Type::Reference(Reference::Array(header as *mut u8))],
         );
 
-        for arg in args.iter() { //Loop through the provided string args and allocate them
+        args.iter().map(|arg| {
             let allocated_string = self.heap.create_string(
                 arg,
                 self.class_loader
@@ -90,7 +90,9 @@ impl VirtualMachine {
             }
 
             index += 1;
-        }
+
+            Result::Ok(())
+        }).collect::<Result<Vec<()>, JvmError>>()?;
 
         thread.add_frame(frame);
 
