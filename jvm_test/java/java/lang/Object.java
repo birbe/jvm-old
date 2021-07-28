@@ -2,6 +2,8 @@ package java.lang;
 
 public class Object {
 
+    public int field;
+
     public Object() {
     }
 

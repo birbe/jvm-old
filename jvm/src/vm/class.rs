@@ -13,6 +13,7 @@ use crate::vm::vm::bytecode::Bytecode;
 use std::collections::hash_map::RandomState;
 use std::ops::Add;
 use std::borrow::Borrow;
+use std::mem::size_of;
 
 #[derive(Debug)]
 pub struct Class { //Parsed info from the .class file
@@ -168,10 +169,10 @@ pub enum RefInfoType {
     InterfaceMethodRef
 }
 
-pub struct RefInfo {
-    pub class_name: String,
-    pub name: String,
-    pub descriptor: String,
+pub struct RefInfo<'a> {
+    pub class_name: &'a str,
+    pub name: &'a str,
+    pub descriptor: &'a str,
     pub info_type: RefInfoType
 }
 
@@ -241,9 +242,9 @@ impl ConstantPool {
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index)?;
 
                 RefInfo {
-                    class_name: String::from(class.clone()),
-                    name: String::from(name_and_type.0.clone()),
-                    descriptor: String::from(name_and_type.1.clone()),
+                    class_name: class,
+                    name: name_and_type.0,
+                    descriptor: name_and_type.1,
                     info_type: RefInfoType::MethodRef
                 }
             },
@@ -252,10 +253,10 @@ impl ConstantPool {
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index)?;
 
                 RefInfo {
-                    class_name: String::from(class.clone()),
-                    name: String::from(name_and_type.0.clone()),
-                    descriptor: String::from(name_and_type.1.clone()),
-                    info_type: RefInfoType::FieldRef
+                    class_name: class,
+                    name: name_and_type.0,
+                    descriptor: name_and_type.1,
+                    info_type: RefInfoType::MethodRef
                 }
             },
             Constant::InterfaceMethodRef(class_index, name_and_type_index) => {
@@ -263,10 +264,10 @@ impl ConstantPool {
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index)?;
 
                 RefInfo {
-                    class_name: String::from(class.clone()),
-                    name: String::from(name_and_type.0),
-                    descriptor: String::from(name_and_type.1),
-                    info_type: RefInfoType::InterfaceMethodRef
+                    class_name: class,
+                    name: name_and_type.0,
+                    descriptor: name_and_type.1,
+                    info_type: RefInfoType::MethodRef
                 }
             },
             _ => return Option::None
@@ -559,8 +560,8 @@ impl BaseType {
         })
     }
 
-    pub fn size_of(base: &BaseType, ptr_length: u8) -> usize {
-        (match base {
+    pub fn size_of(&self) -> usize {
+        (match self {
             BaseType::Byte => {
                 1
             },
@@ -580,7 +581,7 @@ impl BaseType {
                 8
             },
             BaseType::Reference => {
-                ptr_length
+                size_of::<usize>()
             },
             BaseType::Bool => {
                 1

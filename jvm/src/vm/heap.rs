@@ -1,45 +1,52 @@
 use std::rc::Rc;
-use crate::vm::class::{Class};
+use crate::vm::class::{Class, FieldDescriptor};
 use std::alloc::{Layout, dealloc};
 use core::mem;
 use crate::vm::vm::{Operand, OperandType, JvmError};
 use std::ptr;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 
 use std::alloc::alloc;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+use std::fmt::Debug;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use sharded_slab::Slab;
+use std::cell::{UnsafeCell};
 
 pub struct Heap {
-    pub strings: HashMap<String, usize>,
+    pub strings: RwLock<HashMap<String, usize>>,
     pub raw: RawHeap,
-    pub objects: Vec<Object>,
-    available_object_ids: Vec<usize>
+    pub objects: Slab<Object>,
+    pub static_field_map: UnsafeCell<HashMap<(String, String), *mut u8>>, //TODO: &(String, String) for lookups sucks
+    // available_object_ids: RwLock<Vec<usize>>
 }
 
 pub struct RawHeap {
     pub size: usize,
     pub ptr: *mut u8,
-    pub used: usize,
+    pub used: AtomicUsize,
     pub layout: Layout
 }
 
 impl Heap {
     pub fn new(size: usize) -> Self {
         Self {
-            strings: HashMap::new(),
+            strings: RwLock::new(HashMap::new()),
             raw: unsafe { Self::allocate_heap(size) },
-            objects: Vec::new(),
-            available_object_ids: Vec::new()
+            objects: Slab::new(),
+            static_field_map: UnsafeCell::new(HashMap::new())
         }
     }
 
-    pub fn create_string(&mut self, string: &str, str_class: Arc<Class>) -> usize {
-        if self.strings.contains_key(string) {
-            return *self.strings.get(string).unwrap();
+    pub fn create_string(&self, string: &str, str_class: Arc<Class>) -> Result<usize, JvmError> {
+        let mut strings = self.strings.write()?;
+
+        if strings.contains_key(string) {
+            return Result::Ok(*strings.get(string).unwrap());
         }
 
-        let id = self.create_object(str_class.clone());
+        let id = self.create_object(str_class.clone())?;
         let chars_ptr = self.allocate_chars(string);
 
         self.put_field::<usize>(
@@ -49,9 +56,9 @@ impl Heap {
             chars_ptr as usize
         );
 
-        self.strings.insert(String::from(string), id);
+        strings.insert(String::from(string), id);
 
-        id
+        Result::Ok(id)
     }
 
     pub fn allocate_heap(size: usize) -> RawHeap {
@@ -61,49 +68,39 @@ impl Heap {
         RawHeap {
             size,
             ptr,
-            used: 0,
+            used: AtomicUsize::new(0),
             layout
         }
     }
 
-    pub fn allocate_class(&mut self, class: Arc<Class>) -> *mut u8 {
-        let ptr = unsafe { self.raw.ptr.offset(self.raw.used as isize) }; //TODO: bounds check
-        self.raw.used += class.full_heap_size;
-        ptr as *mut u8
+    pub fn allocate(&self, size: usize) -> *mut u8 {
+        let ptr = unsafe { self.raw.ptr.offset(self.raw.used.fetch_add(size, Ordering::Relaxed) as isize) }; //TODO: bounds check
+        ptr
+    }
+
+    pub fn allocate_class(&self, class: Arc<Class>) -> *mut u8 {
+        self.allocate(class.full_heap_size)
     }
 
     pub fn deallocate_class(class: Arc<Class>, ptr: *mut u8) {
         //...
     }
 
-    pub fn create_object(&mut self, class: Arc<Class>) -> usize {
-        let info = Object {
+    pub fn create_object(&self, class: Arc<Class>) -> Result<usize, JvmError> {
+        let object = Object {
             ptr: self.allocate_class(class.clone()),
             class: class.clone()
         };
 
-        if self.available_object_ids.is_empty() {
-            self.objects.push(
-                info
-            );
-        } else {
-            self.objects.insert(
-                self.available_object_ids.pop().unwrap(),
-                info
-            );
-        }
-
-        self.objects.len()-1
+        self.objects.insert(object).ok_or(JvmError::HeapFull)
     }
 
     pub fn destroy_object(&mut self, id: usize) {
-        let info = self.objects.remove(id);
+        let object = self.objects.get(id).unwrap();
 
-        Self::deallocate_class(info.class.clone(), info.ptr);
+        Self::deallocate_class(object.class.clone(), object.ptr);
 
-        if id < self.objects.len() { //There's an empty space somewhere in the Vec that can be used
-            self.available_object_ids.push(id);
-        }
+        self.objects.remove(id);
     }
 
     pub fn put_field<T>(&self, id: usize, class: Arc<Class>, field: &str, value: T) {
@@ -136,7 +133,7 @@ impl Heap {
         }
     }
 
-    pub fn allocate_array(&mut self, intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
+    pub fn allocate_array(&self, intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
         let id = InternArrayType::convert_to_u8(intern_type);
 
         let header = Layout::new::<ArrayHeader>();
@@ -148,12 +145,11 @@ impl Heap {
         assert!(length < u16::MAX as usize);
 
         unsafe {
-            let ptr = self.raw.ptr.offset(self.raw.used as isize);
-            self.raw.used += layout.size();
+            let ptr = self.raw.ptr.offset(self.raw.used.fetch_add(layout.size(), Ordering::Relaxed) as isize);
 
-            // if ptr.is_null() {
-            //     std::alloc::handle_alloc_error(layout);
-            // }
+            if ptr.is_null() {
+                std::alloc::handle_alloc_error(layout);
+            }
 
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
@@ -174,7 +170,7 @@ impl Heap {
         )
     }
 
-    pub fn allocate_chars(&mut self, string: &str) -> *mut ArrayHeader {
+    pub fn allocate_chars(&self, string: &str) -> *mut ArrayHeader {
         unsafe {
             let header = self.allocate_array(InternArrayType::Char, string.len());
 
@@ -186,6 +182,34 @@ impl Heap {
         }
     }
 
+    pub unsafe fn put_static<T: Debug>(&self, class: &str, field_name: &str, field_descriptor: &FieldDescriptor, value: T) {
+        let key = &(String::from(class), String::from(field_name));
+
+        let ptr = if !(*self.static_field_map.get()).contains_key(key) {
+            let size = match field_descriptor {
+                FieldDescriptor::BaseType(bt) => bt.size_of(),
+                _ => size_of::<usize>()
+            };
+
+            let ptr = self.allocate(size);
+            (*self.static_field_map.get()).insert((String::from(class), String::from(field_name)), ptr);
+            ptr
+        } else {
+            *(*self.static_field_map.get()).get(key).unwrap()
+        } as *mut T;
+
+        unsafe {
+            *ptr = value;
+        }
+    }
+
+    pub unsafe fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
+        (*self.static_field_map.get()).get(&(String::from(class), String::from(field_name))).map(|&ptr| {
+            unsafe {
+                *(ptr as *mut T)
+            }
+        })
+    }
 }
 
 unsafe impl Send for Heap {}

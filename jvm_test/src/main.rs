@@ -6,17 +6,13 @@ use std::env::current_dir;
 use std::time::{SystemTime, UNIX_EPOCH};
 use jvm::vm::vm::VirtualMachine;
 use std::path::PathBuf;
-use wasm::WasmEmitter;
-use jvm::vm::linker::loader::ClassLoader;
-use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits, ImportType, Caller};
-use wasmtime::Memory;
 
-use std::io::{Write, Error};
+use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits, ImportType, Caller};
+
 use clap::{App, Arg};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
+use byteorder::{ByteOrder, LittleEndian};
+use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor, Class, ConstantPool};
 use jvm::vm::class::constant::Constant;
-use std::borrow::BorrowMut;
 use std::sync::{Arc, RwLock};
 
 fn main() {
@@ -194,7 +190,7 @@ fn run_vm(path: PathBuf) {
 
     let vm2 = vm.clone();
 
-    let handle1 = thread::spawn(move || {
+    let handle2 = thread::spawn(move || {
         let jvm = vm2.read().unwrap();
         let mut thread = jvm.threads.get("thread 2").unwrap().write().unwrap();
 
@@ -209,6 +205,7 @@ fn run_vm(path: PathBuf) {
     });
 
     handle1.join();
+    handle2.join();
 
     // let elapsed = SystemTime::now().duration_since(start).unwrap().as_nanos();
 

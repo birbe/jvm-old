@@ -14,6 +14,7 @@ use std::{fs, io};
 
 use std::sync::{RwLock, Arc};
 use crate::vm::vm::JvmError;
+use std::mem::size_of;
 
 #[derive(Debug)]
 pub enum ClassLoadState {
@@ -115,7 +116,7 @@ impl ClassLoader {
         // self.loaded_classes.insert(String::from(classpath), true);
         self.class_map.insert(String::from(classpath), ClassLoadState::Loading);
 
-        let mut class = load_class(bytes, 4)?;
+        let mut class = load_class(bytes)?;
 
         if !self.is_class_linked(&class.super_class) {
             if class.super_class != "" {
@@ -300,7 +301,7 @@ impl From<io::Error> for DeserializationError {
     }
 }
 
-pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationError> {
+pub fn load_class(bytes: Vec<u8>) -> Result<Class, DeserializationError> {
     let mut rdr = Cursor::new(bytes);
 
     let magic = rdr.read_u32::<BigEndian>()?;
@@ -383,14 +384,9 @@ pub fn load_class(bytes: Vec<u8>, ptr_len: u8) -> Result<Class, DeserializationE
 
         let size = (match &field.field_descriptor {
             FieldDescriptor::BaseType(b_type) => {
-                BaseType::size_of(b_type, ptr_len)
+                BaseType::size_of(b_type)
             },
-            FieldDescriptor::ObjectType(_) => {
-                ptr_len as usize
-            },
-            FieldDescriptor::ArrayType(_) => {
-                ptr_len as usize
-            }
+            _ => size_of::<usize>()
         }) as isize;
 
         heap_size += size as usize;

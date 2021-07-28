@@ -7,8 +7,8 @@ use std::path::{PathBuf};
 use crate::vm::class::attribute::{AttributeItem};
 use crate::vm::class::BaseType;
 use std::rc::Rc;
-use std::cell::{RefCell};
-use std::io::{Cursor, Error};
+use std::cell::{RefCell, UnsafeCell};
+use std::io::{Cursor, Error, Seek, SeekFrom};
 use byteorder::{ReadBytesExt, BigEndian};
 use crate::vm::class::constant::Constant;
 
@@ -18,9 +18,8 @@ use std::mem::size_of;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vm::heap::{Heap, InternArrayType, Type, Reference};
-use std::sync::{Arc, Mutex, TryLockError, MutexGuard, RwLock, PoisonError, RwLockWriteGuard, RwLockReadGuard};
+use std::sync::{Arc, TryLockError, MutexGuard, RwLock, PoisonError, RwLockWriteGuard, RwLockReadGuard};
 use std::ops::DerefMut;
-use std::borrow::BorrowMut;
 
 static mut BENCHMARKS: u16 = 0;
 
@@ -28,7 +27,7 @@ pub struct VirtualMachine {
     pub start_time: SystemTime,
     pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,
     pub class_loader: Arc<RwLock<ClassLoader>>,
-    pub heap: Arc<RwLock<Heap>>,
+    pub heap: Arc<Heap>
 }
 
 impl VirtualMachine {
@@ -38,7 +37,7 @@ impl VirtualMachine {
             start_time: SystemTime::now(),
 
             class_loader: Arc::new(RwLock::new(ClassLoader::new(classpath_root))),
-            heap: Arc::new(RwLock::new(Heap::new(1024 * 1024)))
+            heap: Arc::new(Heap::new(1024 * 1024))
         }
     }
 
@@ -55,14 +54,14 @@ impl VirtualMachine {
 
         let mut index: u16 = 0;
 
-        let string_arr_ptr = self.heap.write()?.allocate_array(InternArrayType::ClassReference, args.len());
+        let string_arr_ptr = self.heap.allocate_array(InternArrayType::ClassReference, args.len());
 
         let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
 
         frame.local_vars.insert(0, vec![ Type::Reference(Reference::Array(header as *mut u8)) ]);
 
         for arg in args.iter() {
-            let str = self.heap.write()?.create_string(arg, self.class_loader.write()?.load_and_link_class("java/lang/String")?.1);
+            let str = self.heap.create_string(arg, self.class_loader.write()?.load_and_link_class("java/lang/String")?.1)?;
 
             unsafe {
                 *body.offset(size_of::<usize>() as isize * index as isize) = str as usize;
@@ -81,8 +80,7 @@ impl VirtualMachine {
     }
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone, Debug)]
 pub enum OperandType {
     Char,
     Int,
@@ -112,30 +110,14 @@ impl OperandType {
     }
 }
 
-impl Clone for OperandType {
-    fn clone(&self) -> Self {
-        match self {
-            OperandType::Char => OperandType::Char,
-            OperandType::Int => OperandType::Int,
-            OperandType::Float => OperandType::Float,
-            OperandType::Long => OperandType::Long,
-            OperandType::Double => OperandType::Double,
-            OperandType::NullReference => OperandType::NullReference,
-            OperandType::InterfaceReference => OperandType::InterfaceReference,
-            OperandType::ClassReference => OperandType::ClassReference,
-            OperandType::ArrayReference => OperandType::ArrayReference
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Operand (pub OperandType, pub usize);
 
-impl Clone for Operand {
-    fn clone(&self) -> Self {
-        Self(self.0.clone(), self.1.clone())
-    }
-}
+// impl Clone for Operand {
+//     fn clone(&self) -> Self {
+//         Self(self.0.clone(), self.1.clone())
+//     }
+// }
 
 impl Operand {
     pub fn as_type(op: Operand) -> Vec<Type> {
@@ -167,8 +149,72 @@ impl Operand {
             OperandType::ArrayReference => 1
         }
     }
+
+    pub fn into_char(self) -> Option<u16> {
+        match self.0 {
+            OperandType::Char => Option::Some(self.1 as u16),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_int(self) -> Option<u32> {
+        match self.0 {
+            OperandType::Int => Option::Some(self.1 as u32),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_float(self) -> Option<f32> {
+        match self.0 {
+            OperandType::Float => Option::Some(self.1 as f32),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_long(self) -> Option<u64> {
+        match self.0 {
+            OperandType::Long => Option::Some(self.1 as u64),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_double(self) -> Option<f64> {
+        match self.0 {
+            OperandType::Double => Option::Some(self.1 as f64),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_null_reference(self) -> Option<()> {
+        match self.0 {
+            OperandType::NullReference => Option::Some(()),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_interface_reference(self) -> Option<usize> {
+        match self.0 {
+            OperandType::InterfaceReference => Option::Some(self.1 as usize),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_class_reference(self) -> Option<usize> {
+        match self.0 {
+            OperandType::ClassReference => Option::Some(self.1 as usize),
+            _ => Option::None
+        }
+    }
+
+    pub fn into_array_reference(self) -> Option<usize> {
+        match self.0 {
+            OperandType::InterfaceReference => Option::Some(self.1 as usize),
+            _ => Option::None
+        }
+    }
 }
 
+#[derive(Debug)]
 pub struct LocalVariableMap {
     map: HashMap<u16, Type>
 }
@@ -198,6 +244,7 @@ impl LocalVariableMap {
     }
 }
 
+#[derive(Debug)]
 pub struct Frame {
     local_vars: LocalVariableMap,
     method_name: String,
@@ -230,7 +277,8 @@ pub enum JvmError {
     InvalidObjectReference,
     MethodError(MethodError),
     UnresolvedSuper,
-    PoisonedMutex(PoisonedMutexError)
+    PoisonedMutex(PoisonedMutexError),
+    HeapFull
 }
 
 impl<'a> From<PoisonError<RwLockWriteGuard<'a, ClassLoader>>> for JvmError {
@@ -253,6 +301,18 @@ impl<'a> From<PoisonError<RwLockWriteGuard<'a, Heap>>> for JvmError {
 
 impl<'a> From<PoisonError<RwLockReadGuard<'a, Heap>>> for JvmError {
     fn from(_: PoisonError<RwLockReadGuard<'a, Heap>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Heap)
+    }
+}
+
+impl<'a> From<PoisonError<RwLockWriteGuard<'a, HashMap<String, usize>>>> for JvmError {
+    fn from(_: PoisonError<RwLockWriteGuard<'a, HashMap<String, usize>>>) -> Self {
+        Self::PoisonedMutex(PoisonedMutexError::Heap)
+    }
+}
+
+impl<'a> From<PoisonError<RwLockReadGuard<'a, HashMap<String, usize>>>> for JvmError {
+    fn from(_: PoisonError<RwLockReadGuard<'a, HashMap<String, usize>>>) -> Self {
         Self::PoisonedMutex(PoisonedMutexError::Heap)
     }
 }
@@ -294,7 +354,7 @@ impl From<DeserializationError> for JvmError {
 }
 
 pub struct RuntimeThread {
-    heap: Arc<RwLock<Heap>>,
+    heap: Arc<Heap>,
     classloader: Arc<RwLock<ClassLoader>>,
 
     thread_name: Arc<String>,
@@ -302,7 +362,7 @@ pub struct RuntimeThread {
 }
 
 impl RuntimeThread {
-    pub fn new(name: String, heap: Arc<RwLock<Heap>>, classloader: Arc<RwLock<ClassLoader>>) -> RuntimeThread {
+    pub fn new(name: String, heap: Arc<Heap>, classloader: Arc<RwLock<ClassLoader>>) -> RuntimeThread {
         RuntimeThread {
             heap,
             classloader,
@@ -342,6 +402,15 @@ impl RuntimeThread {
         let frame = frame_borrow.deref_mut();
 
         let opcode_pos = frame.code.position();
+
+        if opcode_pos as usize == frame.code.get_ref().len() {
+            drop(frame_borrow);
+
+            self.frame_stack.pop();
+
+            return Result::Ok(());
+        }
+
         let opcode = frame.code.read_u8()?;
 
         match opcode {
@@ -369,7 +438,7 @@ impl RuntimeThread {
                     Constant::Float(float) => frame.op_stack.push(Operand(OperandType::Float, *float as usize)),
                     Constant::String(str_index) => {
                         if let Constant::Utf8(string) = frame.class.constant_pool.get(*str_index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))? {
-                            let allocated_string = self.heap.write()?.create_string(string, self.classloader.read()?.get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?);
+                            let allocated_string = self.heap.create_string(string, self.classloader.read()?.get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?)?;
 
                             frame.op_stack.push(Operand(OperandType::ClassReference, allocated_string as usize));
                         }
@@ -625,6 +694,152 @@ impl RuntimeThread {
             0xb1 => { //return void
 
             },
+            //getstatic
+            0xb2 => {
+                let index = frame.code.read_u16::<BigEndian>()?;
+                let field = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
+
+                let (just_loaded, class) = self.classloader.read()?.get_class(field.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).map(|c| (false, c)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(field.class_name)
+                })?;
+
+                //TODO: the field wouldn't be initialized yet, need to defer
+                if just_loaded && class.has_method("<clinit>", "()V") {
+                    frame.code.seek(SeekFrom::Current(-3))?;
+
+                    drop(frame_borrow);
+
+                    self.frame_stack.push(RwLock::new(RuntimeThread::create_frame(
+                        class.get_method("<clinit>", "()V").unwrap(),
+                        class.clone()
+                    )));
+                } else {
+                    let fd = FieldDescriptor::parse(field.descriptor)?;
+
+                    match &fd {
+                        FieldDescriptor::BaseType(bt) => match bt {
+                            BaseType::Byte => {
+                                let result = unsafe { self.heap.get_static::<u8>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Int
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Char => {
+                                let result = unsafe { self.heap.get_static::<u16>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Int
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Double => {
+                                let result = unsafe { self.heap.get_static::<u64>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Double
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Float => {
+                                let result = unsafe { self.heap.get_static::<u32>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Float
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Int => {
+                                let result = unsafe { self.heap.get_static::<u32>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Int
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Long => {
+                                let result = unsafe { self.heap.get_static::<u64>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Long
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Reference => unreachable!(),
+                            BaseType::Bool => {
+                                let result = unsafe { self.heap.get_static::<u8>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Int
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            },
+                            BaseType::Short => {
+                                let result = unsafe { self.heap.get_static::<u16>(&class.this_class, field.name) };
+                                let ot = match result {
+                                    None => OperandType::NullReference,
+                                    Some(_) => OperandType::Int
+                                };
+                                frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                            }
+                        },
+                        FieldDescriptor::ObjectType(_) => {
+                            let result = unsafe { self.heap.get_static::<usize>(&class.this_class, field.name) };
+                            let ot = match result {
+                                None => OperandType::NullReference,
+                                Some(_) => OperandType::ClassReference
+                            };
+                            frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                        },
+                        FieldDescriptor::ArrayType(_) => {
+                            let result = unsafe { self.heap.get_static::<usize>(&class.this_class, field.name) };
+                            let ot = match result {
+                                None => OperandType::NullReference,
+                                Some(_) => OperandType::ArrayReference
+                            };
+                            frame.op_stack.push(Operand(ot, result.unwrap_or(0) as usize));
+                        }
+                    };
+                }
+            },
+            //putstatic
+            0xb3 => {
+                let index = frame.code.read_u16::<BigEndian>()?;
+                let field = frame.class.constant_pool.resolve_ref_info(index as usize).ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
+
+                let (just_loaded, class) = self.classloader.read()?.get_class(field.class_name).ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded)).map(|c| (true, c)).or_else(|_| {
+                    self.classloader.write()?.load_and_link_class(field.class_name)
+                })?;
+
+                if just_loaded && class.has_method("<clinit>", "()V") {
+                    pending_frames = Option::Some(vec![
+                        RuntimeThread::create_frame(
+                            class.get_method("<clinit>", "()V").unwrap(),
+                            class.clone()
+                        )
+                    ]);
+                }
+
+                let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let fd = FieldDescriptor::parse(field.descriptor)?;
+
+                unsafe { match &fd {
+                    FieldDescriptor::BaseType(bt) => match bt {
+                        BaseType::Byte => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u8),
+                        BaseType::Char => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u16),
+                        BaseType::Double => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u64),
+                        BaseType::Float => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u32),
+                        BaseType::Int => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u32),
+                        BaseType::Long => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u64),
+                        BaseType::Reference => self.heap.put_static(&class.this_class, field.name, &fd, value.1),
+                        BaseType::Bool => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u8),
+                        BaseType::Short => self.heap.put_static(&class.this_class, field.name, &fd, value.1 as u16)
+                    },
+                    FieldDescriptor::ObjectType(_) => self.heap.put_static(&class.this_class, field.name, &fd, value.1),
+                    FieldDescriptor::ArrayType(_) => self.heap.put_static(&class.this_class, field.name, &fd, value.1)
+                };
+            } },
             //getfield
             0xb4 => {
                 //TODO: type checking, exceptions
@@ -637,7 +852,7 @@ impl RuntimeThread {
 
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                let value = self.heap.read()?.get_field::<usize>(object_ref, class, &fieldref.name)?;
+                let value = self.heap.get_field::<usize>(object_ref, class, &fieldref.name)?;
                 let fd = FieldDescriptor::parse(&fieldref.descriptor)?;
 
                 let operand = match fd {
@@ -670,7 +885,7 @@ impl RuntimeThread {
                 let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                self.heap.write()?.put_field(object_ref, class, &fieldref.name, value.1);
+                self.heap.put_field(object_ref, class, &fieldref.name, value.1);
             },
             //invokevirtual
             0xb6 => {
@@ -702,9 +917,7 @@ impl RuntimeThread {
 
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
-                let heap = self.heap.read()?;
-
-                let object_info = heap.objects.get(object_ref.1).ok_or(JvmError::InvalidObjectReference)?;
+                let object_info = self.heap.objects.get(object_ref.1).ok_or(JvmError::InvalidObjectReference)?;
 
                 if method_ref.info_type != RefInfoType::MethodRef { panic!("Invokevirtual must reference a MethodRef!"); }
                 if method_ref.name == "<init>" || method_ref.name == "<clinit>" { panic!("Invokevirtual must not invoke an initialization method!"); }
@@ -868,8 +1081,8 @@ impl RuntimeThread {
                     self.classloader.write()?.load_and_link_class(&method_ref.class_name)
                 })?;
 
-                let md = MethodDescriptor::parse(method_ref.descriptor.as_str())?;
-                let method = class.get_method(method_ref.name.as_str(), method_ref.descriptor.as_str())?;
+                let md = MethodDescriptor::parse(method_ref.descriptor)?;
+                let method = class.get_method(method_ref.name, method_ref.descriptor)?;
 
                 if AccessFlags::is_native(method.access_flags) { //Is native
                     let mut argument_stack: Vec<Operand> = Vec::new();
@@ -882,33 +1095,15 @@ impl RuntimeThread {
                     let name = &*format!("{}|{}", class.this_class, method.name);
 
                     let operands_out = match name {
+                        "Main|panic" => panic!("Java caused panic"),
                         "Main|print_int" => {
                             println!("Main_print_int({})", argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1);
 
                             Option::None
                         },
                         "Main|print_string" => {
-                            let string_reference = argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
-
-                            let chars_ptr = self.heap.read()?.get_field::<usize>(string_reference, self.classloader.read()?.get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?, "chars")?;
-                            let mut string_bytes: Vec<u8> = Vec::new();
-
-                            unsafe {
-                                let (header, body) = Heap::get_array::<u8>(*chars_ptr as *mut u8);
-                                let length = (*header).size;
-
-                                println!("Array length {}", length);
-
-                                for i in 0..length {
-                                    let char = *(body.offset(i as isize));
-                                    string_bytes.push(char);
-                                }
-
-                                let str = String::from_utf8(string_bytes).unwrap();
-                                println!("{}", str);
-
-                                Option::None
-                            }
+                            //Redo this
+                            Option::None
                         },
                         "Main|get_time" => {
                             let epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
@@ -993,7 +1188,7 @@ impl RuntimeThread {
 
                 //TODO: there's probably some type checking and rules that need to be followed here
 
-                let id = self.heap.write()?.create_object(class.clone());
+                let id = self.heap.create_object(class.clone())?;
 
                 //Because of how pending_frames adds frames to the stack, you put it in the reverse order, so the top would end up being at the end of the vec.
 
@@ -1025,7 +1220,7 @@ impl RuntimeThread {
                     _ => unreachable!("Array atype must be between 4 & 11!")
                 };
 
-                let ptr = self.heap.write()?.allocate_array(iat, length.1);
+                let ptr = self.heap.allocate_array(iat, length.1);
                 frame.op_stack.push(Operand(OperandType::ArrayReference, ptr as usize));
             },
             //Breakpoint
@@ -1033,7 +1228,7 @@ impl RuntimeThread {
                 // println!("Breakpoint!");
             }
             _ => {
-                unimplemented!("\n\nOpcode: {}\nClass: {}\nMethod: {}\nIndex: {}\n\n", opcode, frame.class.this_class, frame.method_name, frame.code.position()-1);
+                unimplemented!("\n\nOpcode: {:#02x}\nClass: {}\nMethod: {}\nIndex: {}\n\n", opcode, frame.class.this_class, frame.method_name, frame.code.position()-1);
             }
         }
 
