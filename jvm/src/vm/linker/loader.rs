@@ -2,7 +2,7 @@ use crate::vm::class::attribute::Attribute;
 use crate::vm::class::constant::Constant;
 use crate::vm::class::FieldDescriptor;
 use crate::vm::class::{
-    BaseType, Class, ConstantPool, FieldInfo, Method, MethodDescriptor, MethodReturnType,
+    JavaType, Class, ConstantPool, FieldInfo, Method, MethodDescriptor, MethodReturnType,
     ObjectField,
 };
 use byteorder::{BigEndian, ReadBytesExt};
@@ -11,12 +11,17 @@ use std::io::Cursor;
 
 use std::iter::FromIterator;
 use std::ops::Deref;
-use std::path::PathBuf;
-use std::{fs, io};
 
 use crate::vm::vm::JvmError;
 use std::mem::size_of;
 use std::sync::Arc;
+use std::io;
+
+pub trait ClassProvider: Send + Sync {
+
+    fn get_classfile(&self, classpath: &str) -> Option<&[u8]>;
+
+}
 
 #[derive(Debug)]
 pub enum ClassLoadState {
@@ -24,6 +29,7 @@ pub enum ClassLoadState {
     Loading,
     Loaded(Arc<Class>),
     DeserializationError(DeserializationError),
+    NotFound
 }
 
 impl ClassLoadState {
@@ -35,6 +41,7 @@ impl ClassLoadState {
             ClassLoadState::DeserializationError(_) => {
                 panic!("Cannot unwrap a class that failed to load.")
             }
+            ClassLoadState::NotFound => panic!("Could not find the requested classfile.")
         }
     }
 }
@@ -48,14 +55,14 @@ impl From<DeserializationError> for ClassLoadState {
 pub struct ClassLoader {
     pub class_map: HashMap<String, ClassLoadState>,
 
-    classpath_root: PathBuf,
+    class_provider: Box<dyn ClassProvider>
 }
 
 impl ClassLoader {
-    pub fn new(classpath_root: PathBuf) -> Self {
+    pub fn new(class_provider: Box<dyn ClassProvider>) -> Self {
         Self {
             class_map: HashMap::new(),
-            classpath_root,
+            class_provider
         }
     }
 
@@ -65,20 +72,19 @@ impl ClassLoader {
 
     pub fn is_class_linked(&self, classpath: &str) -> bool {
         let class = self.class_map.get(classpath);
-        if class.is_none() {
-            false
-        } else {
-            if let ClassLoadState::Loaded(_) = class.unwrap() {
-                true
-            } else {
-                false
+
+        match class {
+            None => false,
+            Some(loadstate) => match loadstate {
+                ClassLoadState::Loaded(_) => true,
+                _ => false
             }
         }
     }
 
     fn load_link_field_descriptor(&mut self, fd: &FieldDescriptor) {
         match fd {
-            FieldDescriptor::BaseType(_) => {}
+            FieldDescriptor::JavaType(_) => {}
             FieldDescriptor::ObjectType(obj_classpath) => {
                 self.load_and_link_class(&obj_classpath);
             }
@@ -92,39 +98,28 @@ impl ClassLoader {
     }
 
     pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Arc<Class>), JvmError> {
-        let maybe = self.class_map.get(classpath);
+        let class_load_state = self.class_map.get(classpath);
 
-        match maybe {
+        match class_load_state {
             Some(_) => {
-                match maybe.unwrap() {
+                match class_load_state.unwrap() {
                     ClassLoadState::NotLoaded => {}
-                    ClassLoadState::Loading => {
-                        return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading))
-                    }
-                    ClassLoadState::Loaded(_) => {
-                        return Result::Ok((false, maybe.unwrap().unwrap()))
-                    }
+                    ClassLoadState::Loading => return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading)),
+                    ClassLoadState::Loaded(_) => return Result::Ok((false, class_load_state.unwrap().unwrap())),
                     ClassLoadState::DeserializationError(e) => {
                         return Result::Err(JvmError::ClassLoadError(
                             ClassLoadState::DeserializationError(e.clone()),
                         ))
-                    }
+                    },
+                    ClassLoadState::NotFound => return Result::Err(JvmError::ClassLoadError(ClassLoadState::NotFound))
                 };
             }
             None => {}
         };
 
-        let split_classpath = classpath.split("/");
-        let mut physical_classpath = PathBuf::new();
-
-        for x in split_classpath {
-            physical_classpath = physical_classpath.join(x);
-        }
-        physical_classpath.set_extension("class");
-
-        let real_path = self.classpath_root.join(physical_classpath);
-
-        let bytes = fs::read(real_path).unwrap();
+        let bytes = self.class_provider
+            .get_classfile(classpath)
+            .ok_or(JvmError::ClassLoadError(ClassLoadState::NotFound))?;
 
         // self.loaded_classes.insert(String::from(classpath), true);
         self.class_map
@@ -213,7 +208,7 @@ impl ClassLoader {
                         self.load_and_link_class(&fd_classpath);
                     }
                 }
-                FieldDescriptor::BaseType(_) => {}
+                FieldDescriptor::JavaType(_) => {}
             }
         }
 
@@ -340,7 +335,7 @@ impl From<io::Error> for DeserializationError {
     }
 }
 
-pub fn load_class(bytes: Vec<u8>) -> Result<Class, DeserializationError> {
+pub fn load_class(bytes: &[u8]) -> Result<Class, DeserializationError> {
     let mut rdr = Cursor::new(bytes);
 
     let magic = rdr.read_u32::<BigEndian>()?;
@@ -422,7 +417,7 @@ pub fn load_class(bytes: Vec<u8>) -> Result<Class, DeserializationError> {
             .map_err(|_| DeserializationError::InvalidPayload)?;
 
         let size = (match &field.field_descriptor {
-            FieldDescriptor::BaseType(b_type) => BaseType::size_of(b_type),
+            FieldDescriptor::JavaType(b_type) => JavaType::size_of(b_type),
             _ => size_of::<usize>(),
         }) as isize;
 

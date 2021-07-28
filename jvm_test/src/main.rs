@@ -1,7 +1,6 @@
 use jvm;
 
 use std::env::current_dir;
-use std::{fs, thread};
 
 use jvm::vm::vm::VirtualMachine;
 use std::path::PathBuf;
@@ -11,11 +10,12 @@ use clap::{App, Arg};
 use jvm::vm::class::constant::Constant;
 use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
 use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use jvm::vm::linker::loader::ClassProvider;
+use std::thread;
 
 fn main() {
     let dir = current_dir().unwrap();
-
-    let javaroot = fs::canonicalize(dir.join("jvm_test").join("java")).unwrap();
 
     let app = App::new("Rust JVM Test")
         .version("0.1")
@@ -109,7 +109,7 @@ fn main() {
             // }
         }
         "i" => {
-            run_vm(javaroot);
+            run_vm();
         }
         "serialization" => {
             use jvm::vm::vm::bytecode::Bytecode;
@@ -154,8 +154,46 @@ fn main() {
     }
 }
 
-fn run_vm(path: PathBuf) {
-    let vm = Arc::new(RwLock::new(VirtualMachine::new(path)));
+struct HashMapClassProvider {
+    map: HashMap<String, Vec<u8>>
+}
+
+impl ClassProvider for HashMapClassProvider {
+
+    fn get_classfile(&self, classpath: &str) -> Option<&[u8]> {
+        self.map.get(classpath).map(|vec| &vec[..])
+    }
+
+}
+
+macro_rules! insert_class {
+    ($provider:ident, $name:literal) => {
+        $provider.map.insert(
+            $name.into(),
+            Vec::from(&include_bytes!(
+                concat!("../java/", $name, ".class")
+            )[..])
+        );
+    }
+}
+
+fn run_vm() {
+    let mut class_provider = HashMapClassProvider {
+        map: HashMap::new()
+    };
+
+    insert_class!(class_provider, "Main");
+    insert_class!(class_provider, "Test");
+    insert_class!(class_provider, "java/lang/Object");
+    insert_class!(class_provider, "java/lang/String");
+
+    let vm = Arc::new(
+        RwLock::new(
+            VirtualMachine::new(
+                Box::new(class_provider)
+            )
+        )
+    );
 
     let mut steps = 0;
 

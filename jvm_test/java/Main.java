@@ -22,15 +22,8 @@ public class Main {
 //
 //    public static native void print_long(long l);
 
-    public static void main(String[] str) {
-        while(true) {
-            Object obj = new Object();
-            obj.field = 7;
-            if(obj.field != 7) {
-                print_int(obj.field);
-                panic();
-            }
-        }
+    public static void main(String[] strings) {
+        print_string("Hello world!");
     }
 
     public static void main1(String[] str) {

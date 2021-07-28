@@ -2,7 +2,7 @@ mod control_graph;
 mod ir;
 
 use jvm;
-use jvm::vm::class::{BaseType, Class, FieldDescriptor, Method};
+use jvm::vm::class::{JavaType, Class, FieldDescriptor, Method};
 
 use byteorder::{ByteOrder, LittleEndian};
 use std::collections::HashMap;
@@ -22,23 +22,23 @@ fn format_method_name(class: &Class, method: &Method) -> String {
     )
 }
 
-fn base_type_as_value_type(bt: &BaseType) -> ValType {
+fn base_type_as_value_type(bt: &JavaType) -> ValType {
     match bt {
-        BaseType::Byte => ValType::I32,
-        BaseType::Char => ValType::I32,
-        BaseType::Double => ValType::F64,
-        BaseType::Float => ValType::F32,
-        BaseType::Int => ValType::I32,
-        BaseType::Long => ValType::I64,
-        BaseType::Reference => ValType::I64,
-        BaseType::Bool => ValType::I32,
-        BaseType::Short => ValType::I32,
+        JavaType::Byte => ValType::I32,
+        JavaType::Char => ValType::I32,
+        JavaType::Double => ValType::F64,
+        JavaType::Float => ValType::F32,
+        JavaType::Int => ValType::I32,
+        JavaType::Long => ValType::I64,
+        JavaType::Reference => ValType::I64,
+        JavaType::Bool => ValType::I32,
+        JavaType::Short => ValType::I32,
     }
 }
 
 fn field_descriptor_as_value_type(fd: &FieldDescriptor) -> ValType {
     match fd {
-        FieldDescriptor::BaseType(bt) => base_type_as_value_type(bt),
+        FieldDescriptor::JavaType(bt) => base_type_as_value_type(bt),
         FieldDescriptor::ObjectType(_) => ValType::I32,
         FieldDescriptor::ArrayType(_) => ValType::I32,
     }

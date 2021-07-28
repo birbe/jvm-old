@@ -19,7 +19,7 @@ mod tests {
 
         if let FieldDescriptor::ArrayType(array_type) = b {
             let f = *array_type.field_descriptor;
-            if let FieldDescriptor::BaseType(base_type) = f {
+            if let FieldDescriptor::JavaType(base_type) = f {
             } else {
                 panic!("FieldDescriptor must be a BaseType variant!");
             }

@@ -134,7 +134,7 @@ pub enum ClassError {
 }
 
 impl Class {
-    pub fn get_field(&self, name: &String) -> Result<&ObjectField, ClassError> {
+    pub fn get_field(&self, name: &str) -> Result<&ObjectField, ClassError> {
         self.field_map.get(name).ok_or(ClassError::FieldNotFound)
     }
 
@@ -349,7 +349,7 @@ impl MethodBuilder {
 
 #[derive(Debug)]
 pub enum FieldDescriptor {
-    BaseType(BaseType),
+    JavaType(JavaType),
     /// String will be a classpath to a class
     ObjectType(String),
     //ArrayType will be an ArrayType struct containing the amount of dimensions and a FieldDescriptor that resolves to either BaseType or ObjectType
@@ -359,7 +359,7 @@ pub enum FieldDescriptor {
 impl From<&FieldDescriptor> for String {
     fn from(fd: &FieldDescriptor) -> String {
         match &fd {
-            FieldDescriptor::BaseType(bt) => bt.into(),
+            FieldDescriptor::JavaType(bt) => bt.into(),
             FieldDescriptor::ObjectType(class_name) => {
                 format!("L{};", class_name)
             }
@@ -379,7 +379,7 @@ impl FieldDescriptor {
     pub fn parse(desc: &str) -> Result<FieldDescriptor, ParseError> {
         if "BCDFIJSZ".contains(&desc[0..1]) {
             //BaseType
-            return Ok(FieldDescriptor::BaseType(BaseType::get(&desc[0..1])?));
+            return Ok(FieldDescriptor::JavaType(JavaType::get(&desc[0..1])?));
         } else if &desc[0..1] == "L" {
             //ObjectType
             return Ok(FieldDescriptor::ObjectType(String::from(
@@ -401,7 +401,7 @@ impl FieldDescriptor {
                 //BaseType
                 return Ok(FieldDescriptor::ArrayType(ArrayType {
                     dimensions: dimensions as u8,
-                    field_descriptor: Box::new(FieldDescriptor::BaseType(BaseType::get(
+                    field_descriptor: Box::new(FieldDescriptor::JavaType(JavaType::get(
                         &desc[dimensions..dimensions + 1],
                     )?)),
                 }));
@@ -421,16 +421,16 @@ impl FieldDescriptor {
 
     pub fn matches_operand(&self, operand: OperandType) -> bool {
         match self {
-            FieldDescriptor::BaseType(bt) => match bt {
-                BaseType::Byte => operand == OperandType::Int,
-                BaseType::Char => operand == OperandType::Char,
-                BaseType::Double => operand == OperandType::Double,
-                BaseType::Float => operand == OperandType::Float,
-                BaseType::Int => operand == OperandType::Int,
-                BaseType::Long => operand == OperandType::Long,
-                BaseType::Reference => unreachable!("BaseType should not parse to a reference."),
-                BaseType::Bool => operand == OperandType::Int,
-                BaseType::Short => operand == OperandType::Int,
+            FieldDescriptor::JavaType(bt) => match bt {
+                JavaType::Byte => operand == OperandType::Int,
+                JavaType::Char => operand == OperandType::Char,
+                JavaType::Double => operand == OperandType::Double,
+                JavaType::Float => operand == OperandType::Float,
+                JavaType::Int => operand == OperandType::Int,
+                JavaType::Long => operand == OperandType::Long,
+                JavaType::Reference => unreachable!("BaseType should not parse to a reference."),
+                JavaType::Bool => operand == OperandType::Int,
+                JavaType::Short => operand == OperandType::Int,
             },
             FieldDescriptor::ObjectType(_) => {
                 if operand == OperandType::ClassReference {
@@ -545,7 +545,7 @@ impl From<&MethodDescriptor> for String {
 }
 
 #[derive(Debug)]
-pub enum BaseType {
+pub enum JavaType {
     Byte,
     Char,
     Double,
@@ -557,48 +557,48 @@ pub enum BaseType {
     Short,
 }
 
-impl BaseType {
-    pub fn get(char: &str) -> Result<BaseType, ParseError> {
+impl JavaType {
+    pub fn get(char: &str) -> Result<JavaType, ParseError> {
         Ok(match char {
-            "B" => BaseType::Byte,
-            "C" => BaseType::Char,
-            "D" => BaseType::Double,
-            "F" => BaseType::Float,
-            "I" => BaseType::Int,
-            "J" => BaseType::Long,
-            "S" => BaseType::Short,
-            "Z" => BaseType::Bool,
+            "B" => JavaType::Byte,
+            "C" => JavaType::Char,
+            "D" => JavaType::Double,
+            "F" => JavaType::Float,
+            "I" => JavaType::Int,
+            "J" => JavaType::Long,
+            "S" => JavaType::Short,
+            "Z" => JavaType::Bool,
             _c => return Err(ParseError::InvalidBaseType),
         })
     }
 
     pub fn size_of(&self) -> usize {
         (match self {
-            BaseType::Byte => 1,
-            BaseType::Char => 2,
-            BaseType::Double => 8,
-            BaseType::Float => 4,
-            BaseType::Int => 4,
-            BaseType::Long => 8,
-            BaseType::Reference => size_of::<usize>(),
-            BaseType::Bool => 1,
-            BaseType::Short => 2,
+            JavaType::Byte => 1,
+            JavaType::Char => 2,
+            JavaType::Double => 8,
+            JavaType::Float => 4,
+            JavaType::Int => 4,
+            JavaType::Long => 8,
+            JavaType::Reference => size_of::<usize>(),
+            JavaType::Bool => 1,
+            JavaType::Short => 2,
         }) as usize
     }
 }
 
-impl Into<String> for &BaseType {
+impl Into<String> for &JavaType {
     fn into(self) -> String {
         match self {
-            BaseType::Byte => String::from("B"),
-            BaseType::Char => String::from("C"),
-            BaseType::Double => String::from("D"),
-            BaseType::Float => String::from("F"),
-            BaseType::Int => String::from("I"),
-            BaseType::Long => String::from("J"),
-            BaseType::Short => String::from("S"),
-            BaseType::Bool => String::from("Z"),
-            BaseType::Reference => String::from("L"), //???
+            JavaType::Byte => String::from("B"),
+            JavaType::Char => String::from("C"),
+            JavaType::Double => String::from("D"),
+            JavaType::Float => String::from("F"),
+            JavaType::Int => String::from("I"),
+            JavaType::Long => String::from("J"),
+            JavaType::Short => String::from("S"),
+            JavaType::Bool => String::from("Z"),
+            JavaType::Reference => String::from("L"), //???
         }
     }
 }
