@@ -1,36 +1,33 @@
 use jvm;
 
-use std::{fs, thread};
 use std::env::current_dir;
+use std::{fs, thread};
 
-use std::time::{SystemTime, UNIX_EPOCH};
 use jvm::vm::vm::VirtualMachine;
 use std::path::PathBuf;
-
-use wasmtime::{Store, Module, Func, ValType, Instance, Val, MemoryType, Limits, ImportType, Caller};
+use std::time::SystemTime;
 
 use clap::{App, Arg};
-use byteorder::{ByteOrder, LittleEndian};
-use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor, Class, ConstantPool};
 use jvm::vm::class::constant::Constant;
+use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
 use std::sync::{Arc, RwLock};
 
 fn main() {
     let dir = current_dir().unwrap();
 
-    let javaroot = fs::canonicalize(
-        dir.join("jvm_test").join("java")
-    ).unwrap();
+    let javaroot = fs::canonicalize(dir.join("jvm_test").join("java")).unwrap();
 
     let app = App::new("Rust JVM Test")
         .version("0.1")
         .about("Tests the JVM in either WASM-compilation mode or interpreted mode")
-        .arg(Arg::with_name("mode")
-            .long("mode")
-            .short("m")
-            .help("Modes: `wasm` or `i` (interpreted)")
-            .takes_value(true)
-            .required(true))
+        .arg(
+            Arg::with_name("mode")
+                .long("mode")
+                .short("m")
+                .help("Modes: `wasm` or `i` (interpreted)")
+                .takes_value(true)
+                .required(true),
+        )
         .get_matches();
 
     let mode = app.value_of("mode").unwrap();
@@ -110,64 +107,87 @@ fn main() {
             //         &[Val::I32(100)]
             //     );
             // }
-        },
+        }
         "i" => {
             run_vm(javaroot);
-        },
+        }
         "serialization" => {
             use jvm::vm::vm::bytecode::Bytecode;
 
             let mut class_builder = ClassBuilder::new(String::from("Main"), Option::None);
-            let mut method_builder = MethodBuilder::new(String::from("main"), MethodDescriptor::parse("(Ljava/lang/String;)V").unwrap(), 1);
+            let mut method_builder = MethodBuilder::new(
+                String::from("main"),
+                MethodDescriptor::parse("(Ljava/lang/String;)V").unwrap(),
+                1,
+            );
 
-            let print_string_method_utf8 = class_builder.add_constant(Constant::Utf8(String::from("print_string")));
-            let print_string_method_type = class_builder.add_constant(Constant::Utf8(String::from("(Ljava/lang/String);")));
-            let print_string_method_descriptor = class_builder.add_constant(Constant::MethodType(print_string_method_type));
+            let print_string_method_utf8 =
+                class_builder.add_constant(Constant::Utf8(String::from("print_string")));
+            let print_string_method_type =
+                class_builder.add_constant(Constant::Utf8(String::from("(Ljava/lang/String);")));
+            let print_string_method_descriptor =
+                class_builder.add_constant(Constant::MethodType(print_string_method_type));
 
-            let name_and_type = class_builder.add_constant(Constant::NameAndType(print_string_method_utf8, print_string_method_descriptor));
+            let name_and_type = class_builder.add_constant(Constant::NameAndType(
+                print_string_method_utf8,
+                print_string_method_descriptor,
+            ));
             let class_name_utf8 = class_builder.add_constant(Constant::Utf8(String::from("Main")));
             let class = class_builder.add_constant(Constant::Class(class_name_utf8));
 
-            let method_constant = class_builder.add_constant(Constant::MethodRef(class, name_and_type));
+            let method_constant =
+                class_builder.add_constant(Constant::MethodRef(class, name_and_type));
 
             method_builder.set_instructions(vec![
                 Bytecode::Aload_n(1),
                 Bytecode::Iconst_n_m1(0),
                 Bytecode::Aaload,
                 Bytecode::Invokestatic(method_constant),
-                Bytecode::Areturn
+                Bytecode::Areturn,
             ]);
 
             class_builder.add_method(method_builder);
 
             dbg!(class_builder.serialize());
-        },
-        _ => panic!("Unknown execution method. Must be `wasm` or `i` (interpreted)")
+        }
+        _ => panic!("Unknown execution method. Must be `wasm` or `i` (interpreted)"),
     }
 }
 
 fn run_vm(path: PathBuf) {
-    let mut vm = Arc::new(RwLock::new(VirtualMachine::new(path)));
-
-    let start;
+    let vm = Arc::new(RwLock::new(VirtualMachine::new(path)));
 
     let mut steps = 0;
 
     {
         let mut vm = vm.write().unwrap();
 
-        let (_, main) = vm.class_loader.write().unwrap().load_and_link_class("Main").ok().unwrap();
+        vm.class_loader
+            .write()
+            .unwrap()
+            .load_and_link_class("Main")
+            .ok()
+            .unwrap();
 
-        let thread1 = vm.spawn_thread("thread 1", "Main", "main", "([Ljava/lang/String;)V", vec![
-            String::from("Hello world!")
-        ]).unwrap();
+        vm.spawn_thread(
+            "thread 1",
+            "Main",
+            "main",
+            "([Ljava/lang/String;)V",
+            vec![String::from("Hello world!")],
+        )
+        .unwrap();
 
-        let thread2 = vm.spawn_thread("thread 2", "Main", "main1", "([Ljava/lang/String;)V", vec![
-            String::from("Hello world!")
-        ]).unwrap();
+        vm.spawn_thread(
+            "thread 2",
+            "Main",
+            "main1",
+            "([Ljava/lang/String;)V",
+            vec![String::from("Hello world!")],
+        )
+        .unwrap();
 
         vm.start_time = SystemTime::now();
-        start = SystemTime::now();
 
         // let mut step_start = SystemTime::now();
     }
@@ -181,10 +201,8 @@ fn run_vm(path: PathBuf) {
         while thread.get_stack_count() > 0 {
             match thread.step() {
                 Ok(_) => {}
-                Err(e) => panic!(format!("The Java Virtual Machine has encountered an unrecoverable error and cannot continue.\n{:?}", e))
+                Err(e) => panic!("The Java Virtual Machine has encountered an unrecoverable error and cannot continue.\n{:?}", e)
             }
-
-            steps += 1;
         }
     });
 
@@ -197,10 +215,8 @@ fn run_vm(path: PathBuf) {
         while thread.get_stack_count() > 0 {
             match thread.step() {
                 Ok(_) => {}
-                Err(e) => panic!(format!("The Java Virtual Machine has encountered an unrecoverable error and cannot continue.\n{:?}", e))
+                Err(e) => panic!("The Java Virtual Machine has encountered an unrecoverable error and cannot continue.\n{:?}", e)
             }
-
-            steps += 1;
         }
     });
 
@@ -222,5 +238,4 @@ mod tests {
         let field_descriptor = FieldDescriptor::parse(field_descriptor_str).unwrap();
         assert_eq!(String::from(&field_descriptor), field_descriptor_str);
     }
-
 }

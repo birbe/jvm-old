@@ -1,11 +1,8 @@
-use walrus::ir::Instr;
 use jvm::vm::vm::bytecode::Bytecode;
 use std::collections::HashMap;
-use std::io::{Cursor, Seek, SeekFrom};
-use std::cmp::{min, max};
-use crate::control_graph::{NodeGraph, Node};
+
+use crate::control_graph::{Node, NodeGraph};
 use std::ops::Range;
-use jvm::vm::vm::OperandType;
 
 pub type LengthOfBlock = usize;
 
@@ -13,13 +10,13 @@ pub type LengthOfBlock = usize;
 pub enum ScopeType {
     If(Range<usize>),
     Block(Range<usize>),
-    Loop(Range<usize>)
+    Loop(Range<usize>),
 }
 
 #[derive(Clone, Debug)]
 pub enum BlockType {
     Loop(usize),
-    Block(usize)
+    Block(usize),
 }
 
 pub type IndexedBytecode = (Bytecode, usize);
@@ -27,7 +24,7 @@ pub type IndexedBytecode = (Bytecode, usize);
 #[derive(Clone, Debug)]
 pub enum BytecodeOrBlock {
     Block(BlockType),
-    Bytecode(IndexedBytecode)
+    Bytecode(IndexedBytecode),
 }
 
 #[derive(Debug)]
@@ -36,20 +33,20 @@ pub enum Relooped {
     LoopBlock(Vec<Relooped>),
     IfBlock(Vec<Relooped>),
     Block(Vec<Relooped>),
-    Dispatcher(Vec<Relooped>)
+    Dispatcher(Vec<Relooped>),
 }
 
 pub struct ControlFlow {
     pub source_bytecode_to_byte: HashMap<usize, usize>,
     pub source_byte_to_bytecode: HashMap<usize, usize>,
-    pub bytecode: Vec<IndexedBytecode>
+    pub bytecode: Vec<IndexedBytecode>,
 }
 
 pub type ScopedNode = (Node<IndexedBytecode>, usize, Vec<ScopeType>);
 
 enum StackMetricsError {
     DynamicStackSemantics, //When the operands of an instruction are only known at compile time
-    Other //I'm lazy
+    Other,                 //I'm lazy
 }
 
 // fn create_stack_metrics(bytecode: Vec<Bytecode>) -> Result<Vec<(Bytecode, usize)>, StackMetricsError> {
@@ -228,22 +225,24 @@ enum StackMetricsError {
 // }
 
 impl ControlFlow {
-
     fn make_control_flow_graph(&mut self) -> NodeGraph<IndexedBytecode> {
-
         let mut id = 0;
 
-        let mut nodes: Vec<Node<IndexedBytecode>> = self.bytecode.iter().map(|bytecode| {
-            let node = Node {
-                id,
-                front_edges: vec![],
-                bytecode: bytecode.clone()
-            };
+        let mut nodes: Vec<Node<IndexedBytecode>> = self
+            .bytecode
+            .iter()
+            .map(|bytecode| {
+                let node = Node {
+                    id,
+                    front_edges: vec![],
+                    bytecode: bytecode.clone(),
+                };
 
-            id += 1;
+                id += 1;
 
-            node
-        }).collect();
+                node
+            })
+            .collect();
 
         for index in 0..self.bytecode.len() {
             let instr = self.bytecode.get(index).unwrap();
@@ -251,38 +250,49 @@ impl ControlFlow {
             let byte_index = *self.source_bytecode_to_byte.get(&index).unwrap();
 
             match &instr.0 {
-                Bytecode::If_acmpeq(offset) |
-                Bytecode::If_acmpne(offset) |
-                Bytecode::If_icmpeq(offset) |
-                Bytecode::If_icmpne(offset) |
-                Bytecode::If_icmplt(offset) |
-                Bytecode::If_icmpge(offset) |
-                Bytecode::If_icmpgt(offset) |
-                Bytecode::If_icmple(offset) |
-                Bytecode::Ifeq(offset) |
-                Bytecode::Ifne(offset) |
-                Bytecode::Iflt(offset) |
-                Bytecode::Ifge(offset) |
-                Bytecode::Ifgt(offset) |
-                Bytecode::Ifle(offset) |
-                Bytecode::Ifnonnull(offset) |
-                Bytecode::Ifnull(offset) => {
-                    let target_bytecode_index = *self.source_byte_to_bytecode.get(
-                        &(( (byte_index as isize) + (*offset as isize) ) as usize)
-                    ).unwrap();
+                Bytecode::If_acmpeq(offset)
+                | Bytecode::If_acmpne(offset)
+                | Bytecode::If_icmpeq(offset)
+                | Bytecode::If_icmpne(offset)
+                | Bytecode::If_icmplt(offset)
+                | Bytecode::If_icmpge(offset)
+                | Bytecode::If_icmpgt(offset)
+                | Bytecode::If_icmple(offset)
+                | Bytecode::Ifeq(offset)
+                | Bytecode::Ifne(offset)
+                | Bytecode::Iflt(offset)
+                | Bytecode::Ifge(offset)
+                | Bytecode::Ifgt(offset)
+                | Bytecode::Ifle(offset)
+                | Bytecode::Ifnonnull(offset)
+                | Bytecode::Ifnull(offset) => {
+                    let target_bytecode_index = *self
+                        .source_byte_to_bytecode
+                        .get(&(((byte_index as isize) + (*offset as isize)) as usize))
+                        .unwrap();
 
-                    if index < self.bytecode.len() - 1 { //Conditional, so also add the next instruction
+                    if index < self.bytecode.len() - 1 {
+                        //Conditional, so also add the next instruction
                         nodes.get_mut(index).unwrap().front_edges.push(index + 1);
                     }
 
-                    nodes.get_mut(index).unwrap().front_edges.push(target_bytecode_index);
-                },
+                    nodes
+                        .get_mut(index)
+                        .unwrap()
+                        .front_edges
+                        .push(target_bytecode_index);
+                }
                 Bytecode::Goto(offset) => {
-                    let target_bytecode_index = *self.source_byte_to_bytecode.get(
-                        &(( (byte_index as isize) + (*offset as isize) ) as usize)
-                    ).unwrap();
+                    let target_bytecode_index = *self
+                        .source_byte_to_bytecode
+                        .get(&(((byte_index as isize) + (*offset as isize)) as usize))
+                        .unwrap();
 
-                    nodes.get_mut(index).unwrap().front_edges.push(target_bytecode_index);
+                    nodes
+                        .get_mut(index)
+                        .unwrap()
+                        .front_edges
+                        .push(target_bytecode_index);
                 }
 
                 Bytecode::Jsr(_) => unimplemented!(),
@@ -293,28 +303,29 @@ impl ControlFlow {
                 Bytecode::Tableswitch => {}
                 Bytecode::Wide(_) => {}
 
-                _ => if index < self.bytecode.len() - 1 { //Non control-flow related instruction
-                    nodes.get_mut(index).unwrap().front_edges.push(index + 1);
+                _ => {
+                    if index < self.bytecode.len() - 1 {
+                        //Non control-flow related instruction
+                        nodes.get_mut(index).unwrap().front_edges.push(index + 1);
+                    }
                 }
             }
         }
 
-        NodeGraph {
-            nodes
-        }
-
+        NodeGraph { nodes }
     }
 
     //The first pass flags each location in the bytecode that requires a block
     fn mark_scopes(&mut self, graph: NodeGraph<IndexedBytecode>) {
-
-        let mut scoped: Vec<ScopedNode> = graph.nodes.into_iter().map(|node| {
-            (node, 0, Vec::new())
-        }).collect();
+        let mut scoped: Vec<ScopedNode> = graph
+            .nodes
+            .into_iter()
+            .map(|node| (node, 0, Vec::new()))
+            .collect();
 
         let scoped_view = scoped.clone();
 
-        let scopes: Vec<(Range<usize>, BlockType)> = Vec::new();
+        let _scopes: Vec<(Range<usize>, BlockType)> = Vec::new();
 
         //Define the scopes that each instruction is located in
 
@@ -322,13 +333,15 @@ impl ControlFlow {
             let (node, _, _) = scoped_view.get(index).unwrap();
 
             node.front_edges.iter().for_each(|front_id| {
-                if *front_id < index { //Loop, create a scope ending at this instruction and beginning at the target
+                if *front_id < index {
+                    //Loop, create a scope ending at this instruction and beginning at the target
                     (*front_id..index).for_each(|node_index| {
                         let mut node = scoped.get_mut(node_index).unwrap();
                         node.1 += 1;
                         node.2.push(ScopeType::Loop(*front_id..index));
                     });
-                } else if (*front_id - index) > 1 { //Jump forwards, disregarding the directly following node
+                } else if (*front_id - index) > 1 {
+                    //Jump forwards, disregarding the directly following node
                     let depth = scoped.get(index).unwrap().1;
 
                     let mut begin = 0;
@@ -419,20 +432,24 @@ impl ControlFlow {
     //     folded
     // }
 
-    pub fn convert(bytecode: &[u8], method: &str) -> Option<Vec<Relooped>> {
+    pub fn convert(bytecode: &[u8], _method: &str) -> Option<Vec<Relooped>> {
         let mut control_flow = Self {
             source_bytecode_to_byte: HashMap::new(),
             source_byte_to_bytecode: HashMap::new(),
-            bytecode: Vec::new()
+            bytecode: Vec::new(),
         };
 
         let bytecodes = Bytecode::from_bytes_with_indices(0, &bytecode).ok()?;
 
         bytecodes.into_iter().for_each(|(bytecode, index)| {
-            let length = Bytecode::size_of(&bytecode);
+            let _length = Bytecode::size_of(&bytecode);
 
-            control_flow.source_bytecode_to_byte.insert(control_flow.bytecode.len(), index as usize);
-            control_flow.source_byte_to_bytecode.insert(index as usize, control_flow.bytecode.len());
+            control_flow
+                .source_bytecode_to_byte
+                .insert(control_flow.bytecode.len(), index as usize);
+            control_flow
+                .source_byte_to_bytecode
+                .insert(index as usize, control_flow.bytecode.len());
 
             control_flow.bytecode.push((bytecode, index as usize));
         });
@@ -453,12 +470,10 @@ impl ControlFlow {
         // Option::Some(folded_bytecode)
         Option::None
     }
-
 }
 
 impl From<Vec<u8>> for ControlFlow {
-    fn from(bytes: Vec<u8>) -> Self {
+    fn from(_bytes: Vec<u8>) -> Self {
         unimplemented!()
     }
 }
-

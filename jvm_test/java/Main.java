@@ -9,7 +9,7 @@ public class Main {
 
     public static native void print_int(int i);
 //
-    public static native void print_string(int i);
+    public static native void print_string(String str);
 
     public static native void panic();
 
@@ -34,10 +34,6 @@ public class Main {
     }
 
     public static void main1(String[] str) {
-//        while(true) {
-//            Object obj = new Object();
-//            obj.field = 255;
-//        }
     }
 
 }

@@ -1,34 +1,25 @@
-mod ir;
 mod control_graph;
+mod ir;
 
 use jvm;
-use jvm::vm::class::{Class, Method, MethodDescriptor, FieldDescriptor, BaseType, MethodReturnType, AccessFlags};
-use std::rc::Rc;
-use crypto::sha2::Sha256;
-use crypto::digest::Digest;
-use jvm::vm::class::attribute::AttributeItem::Signature;
-use std::error::Error;
-use jvm::vm::class::attribute::{AttributeItem, Code};
-use std::io::{Cursor, Seek, SeekFrom};
-use jvm::vm::class::constant::Constant;
+use jvm::vm::class::{BaseType, Class, FieldDescriptor, Method};
+
+use byteorder::{ByteOrder, LittleEndian};
 use std::collections::HashMap;
-use byteorder::{ReadBytesExt, BigEndian, LittleEndian, ByteOrder};
-use jvm::vm::vm::VirtualMachine;
+
 use jvm::vm::linker::loader::ClassLoader;
-use std::cmp::max;
-use walrus::{Module, ModuleConfig, LocalFunction, ValType, FunctionBuilder, FunctionId, ImportId, LocalId, ModuleLocals, MemoryId, FunctionKind, ExportItem, ImportKind, Memory, InstrSeqBuilder};
-use walrus::ir::*;
-use walrus::ir::{BinaryOp, StoreKind, MemArg, LoadKind, Instr, Value, InstrSeqId, InstrSeqType};
+
+use walrus::{FunctionId, ImportId, LocalId, MemoryId, Module, ModuleLocals, ValType};
+
 use std::io;
-use jvm::vm::vm::bytecode::Bytecode;
-use crate::ir::{ControlFlow, Relooped, IndexedBytecode};
-use std::cell::{RefCell, RefMut};
-use std::borrow::{Borrow, BorrowMut};
-use std::ops::DerefMut;
-use std::hint::unreachable_unchecked;
+
+use std::cell::RefCell;
 
 fn format_method_name(class: &Class, method: &Method) -> String {
-    format!("{}!{}!{}", class.this_class, &method.name, &method.descriptor)
+    format!(
+        "{}!{}!{}",
+        class.this_class, &method.name, &method.descriptor
+    )
 }
 
 fn base_type_as_value_type(bt: &BaseType) -> ValType {
@@ -41,7 +32,7 @@ fn base_type_as_value_type(bt: &BaseType) -> ValType {
         BaseType::Long => ValType::I64,
         BaseType::Reference => ValType::I64,
         BaseType::Bool => ValType::I32,
-        BaseType::Short => ValType::I32
+        BaseType::Short => ValType::I32,
     }
 }
 
@@ -49,7 +40,7 @@ fn field_descriptor_as_value_type(fd: &FieldDescriptor) -> ValType {
     match fd {
         FieldDescriptor::BaseType(bt) => base_type_as_value_type(bt),
         FieldDescriptor::ObjectType(_) => ValType::I32,
-        FieldDescriptor::ArrayType(_) => ValType::I32
+        FieldDescriptor::ArrayType(_) => ValType::I32,
     }
 }
 
@@ -60,9 +51,9 @@ pub enum ResourceType {
     ObjectInstance {
         classpath_offset: u32,
         fields: Vec<u8>,
-        fields_length: i32
+        fields_length: i32,
     }, //Manually created data in the memory layout, like a pre-allocated class
-    Null
+    Null,
 }
 
 impl ResourceType {
@@ -71,8 +62,12 @@ impl ResourceType {
             ResourceType::U32(_) => 4,
             ResourceType::I32(_) => 4,
             ResourceType::UTF8(str) => (str.len() * 2) as u32 + 4,
-            ResourceType::ObjectInstance { classpath_offset, fields_length, .. } => 4 + *fields_length as u32,
-            ResourceType::Null => 1
+            ResourceType::ObjectInstance {
+                classpath_offset: _,
+                fields_length,
+                ..
+            } => 4 + *fields_length as u32,
+            ResourceType::Null => 1,
         }
     }
 
@@ -82,14 +77,14 @@ impl ResourceType {
                 let mut buf = [0u8; 4];
                 LittleEndian::write_i32(&mut buf[..], *u as i32);
                 buf.into()
-            },
+            }
             ResourceType::I32(i) => {
                 let mut buf = [0u8; 4];
                 LittleEndian::write_i32(&mut buf[..], *i);
                 buf.into()
-            },
+            }
             ResourceType::UTF8(string) => {
-                let mut vec = vec![0,0,0,0];
+                let mut vec = vec![0, 0, 0, 0];
                 LittleEndian::write_u32(&mut vec[..], string.len() as u32);
 
                 for char in string.as_bytes() {
@@ -99,21 +94,25 @@ impl ResourceType {
 
                 vec
             }
-            ResourceType::ObjectInstance { classpath_offset, fields, fields_length } => {
-                let mut vec = vec![0,0,0,0];
+            ResourceType::ObjectInstance {
+                classpath_offset,
+                fields,
+                fields_length,
+            } => {
+                let mut vec = vec![0, 0, 0, 0];
                 LittleEndian::write_i32(&mut vec[..], *classpath_offset as i32);
                 vec.extend_from_slice(&fields[..*fields_length as usize]);
 
                 vec
             }
-            ResourceType::Null => vec![ 0u8 ]
+            ResourceType::Null => vec![0u8],
         }
     }
 }
 
 pub struct Resource {
     pub res_type: ResourceType,
-    pub offset: u32
+    pub offset: u32,
 }
 
 /*
@@ -134,22 +133,31 @@ struct MemoryLayout {
     pub constant_resource_map: HashMap<u16, usize>,
     pub null: u32,
     pub heap_size: u32,
-    pub memory_id: MemoryId
+    pub memory_id: MemoryId,
 }
 
 impl MemoryLayout {
     pub fn new(memory_id: MemoryId) -> Self {
         Self {
             resources: vec![
-                Resource { res_type: ResourceType::U32(1 + 16 + 4), offset: 0 }, //Heap size, including the heap size u32
-                Resource { res_type: ResourceType::Null, offset: 4 }, //Only needs to be 1 byte long
-                Resource { res_type: ResourceType::UTF8(String::from("java/lang/String")), offset: 5 }
+                Resource {
+                    res_type: ResourceType::U32(1 + 16 + 4),
+                    offset: 0,
+                }, //Heap size, including the heap size u32
+                Resource {
+                    res_type: ResourceType::Null,
+                    offset: 4,
+                }, //Only needs to be 1 byte long
+                Resource {
+                    res_type: ResourceType::UTF8(String::from("java/lang/String")),
+                    offset: 5,
+                },
             ],
             strings: HashMap::new(),
             constant_resource_map: HashMap::new(),
             null: 1,
             heap_size: 0,
-            memory_id
+            memory_id,
         }
     }
 
@@ -161,7 +169,7 @@ impl MemoryLayout {
 
         self.resources.push(Resource {
             res_type: resource_type,
-            offset
+            offset,
         });
 
         let resource: &mut Resource = self.resources.get_mut(self.heap_size as usize).unwrap();
@@ -169,7 +177,7 @@ impl MemoryLayout {
         match &mut resource.res_type {
             ResourceType::U32(size) => {
                 *size += resource_size;
-            },
+            }
             _ => {}
         }
 
@@ -177,12 +185,10 @@ impl MemoryLayout {
     }
 
     pub fn allocate_string(&mut self, string: String, string_class: &Class) -> usize {
-        let size = string_class.full_heap_size + 4; //Following the memory layout
+        let _size = string_class.full_heap_size + 4; //Following the memory layout
 
         let resource_index = self.append_resource(ResourceType::UTF8(string));
-        let utf8 = self.resources.get(
-            resource_index
-        ).unwrap().offset;
+        let utf8 = self.resources.get(resource_index).unwrap().offset;
 
         let mut fields = vec![0, 0, 0, 0];
 
@@ -191,14 +197,12 @@ impl MemoryLayout {
         self.append_resource(ResourceType::ObjectInstance {
             classpath_offset: 5,
             fields,
-            fields_length: string_class.full_heap_size as i32
+            fields_length: string_class.full_heap_size as i32,
         })
     }
 
     pub fn as_vec(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(
-            self.resources.last().unwrap().offset as usize
-        );
+        let mut out = Vec::with_capacity(self.resources.last().unwrap().offset as usize);
 
         let mut last_index = 0;
 
@@ -208,7 +212,7 @@ impl MemoryLayout {
             }
 
             out.append(&mut res.res_type.as_vec());
-            last_index = res.offset+res.res_type.size_of();
+            last_index = res.offset + res.res_type.size_of();
         }
 
         out
@@ -218,7 +222,7 @@ impl MemoryLayout {
 struct StackHelper<'locals> {
     vars: HashMap<ValType, Vec<LocalId>>,
     types: Vec<ValType>,
-    locals: &'locals mut ModuleLocals
+    locals: &'locals mut ModuleLocals,
 }
 
 impl<'locals> StackHelper<'locals> {
@@ -226,7 +230,7 @@ impl<'locals> StackHelper<'locals> {
         Self {
             vars: HashMap::new(),
             types: Vec::new(),
-            locals: module
+            locals: module,
         }
     }
 
@@ -237,13 +241,11 @@ impl<'locals> StackHelper<'locals> {
 
         let vec = self.vars.get_mut(&t).unwrap();
 
-        if offset+1 > vec.len() {
+        if offset + 1 > vec.len() {
             let diff = offset + 1 - vec.len();
 
             for _ in 0..diff {
-                vec.push(
-                    self.locals.add(t)
-                );
+                vec.push(self.locals.add(t));
 
                 self.types.push(t)
             }
@@ -256,29 +258,32 @@ impl<'locals> StackHelper<'locals> {
 #[derive(Debug)]
 pub enum MethodFunctionType {
     Normal(FunctionId, Vec<LocalId>),
-    NativeImport(FunctionId, ImportId)
+    NativeImport(FunctionId, ImportId),
 }
 
 impl MethodFunctionType {
-
     fn unwrap_normal(&self) -> (FunctionId, &Vec<LocalId>) {
         match self {
             MethodFunctionType::Normal(func, vec) => (*func, vec),
-            MethodFunctionType::NativeImport(_, _) => panic!("Tried to unwrap normal function, was an import!")
+            MethodFunctionType::NativeImport(_, _) => {
+                panic!("Tried to unwrap normal function, was an import!")
+            }
         }
     }
-
 }
 
 pub struct SerializedMemory {
     pub data: Vec<u8>,
-    pub strings: HashMap<String, usize>
+    pub strings: HashMap<String, usize>,
 }
 
 macro_rules! xload_n {
     ($n:expr, $md:ident, $variables:ident) => {
-        $variables.get(&$n).ok_or(CompilationError::UnknownLocal($n))?.clone()
-    }
+        $variables
+            .get(&$n)
+            .ok_or(CompilationError::UnknownLocal($n))?
+            .clone()
+    };
 }
 
 pub struct WasmEmitter<'classloader> {
@@ -288,7 +293,7 @@ pub struct WasmEmitter<'classloader> {
     pub(crate) class_loader: &'classloader ClassLoader,
 
     pub class_resource_map: HashMap<String, u32>, //String being the classpath, and the u32 being a location in the resources
-    pub main_export: String
+    pub main_export: String,
 }
 
 #[derive(Debug)]
@@ -298,7 +303,7 @@ pub enum CompilationError {
     EOF,
     NoneError,
     MethodNotFound,
-    InvalidIntermediate
+    InvalidIntermediate,
 }
 
 impl From<io::Error> for CompilationError {
@@ -307,6 +312,4 @@ impl From<io::Error> for CompilationError {
     }
 }
 
-pub enum Intermediate1 {
-
-}
+pub enum Intermediate1 {}

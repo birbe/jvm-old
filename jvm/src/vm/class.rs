@@ -1,22 +1,23 @@
-use crate::vm::class::attribute::{Attribute};
+use crate::vm::class::attribute::Attribute;
 use crate::vm::class::constant::Constant;
 
-use std::io::{Cursor, Read, Seek, Error, Write};
-use byteorder::{ReadBytesExt, BigEndian, WriteBytesExt};
-use std::collections::{HashMap, HashSet};
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use std::collections::HashMap;
+use std::io::{Cursor, Read, Seek, Write};
 
-use crate::vm::vm::{OperandType};
-use std::rc::Rc;
-use std::sync::{RwLock, Arc};
+use crate::vm::vm::OperandType;
+
+use std::sync::Arc;
 
 use crate::vm::vm::bytecode::Bytecode;
-use std::collections::hash_map::RandomState;
+
 use std::ops::Add;
-use std::borrow::Borrow;
+
 use std::mem::size_of;
 
 #[derive(Debug)]
-pub struct Class { //Parsed info from the .class file
+pub struct Class {
+    //Parsed info from the .class file
     pub constant_pool: ConstantPool,
     pub access_flags: u16,
     pub this_class: String,
@@ -26,8 +27,8 @@ pub struct Class { //Parsed info from the .class file
     pub method_map: HashMap<(String, String), Arc<Method>>,
     pub attribute_map: HashMap<String, Attribute>,
     pub heap_size: usize,
-    pub full_heap_size: usize //Heap size of this class plus the superclass
-    //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
+    pub full_heap_size: usize, //Heap size of this class plus the superclass
+                               //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
 }
 
 ///Method for easily creating classes
@@ -53,11 +54,10 @@ pub struct ClassBuilder {
     pub constants: Vec<Constant>,
     pub field_map: HashMap<String, ObjectField>,
     pub method_map: HashMap<String, HashMap<String, Method>>,
-    pub attribute_map: HashMap<String, Attribute>
+    pub attribute_map: HashMap<String, Attribute>,
 }
 
 impl ClassBuilder {
-
     pub fn new(this_class: String, superclass: Option<String>) -> Self {
         Self {
             access_flags: 0,
@@ -66,7 +66,7 @@ impl ClassBuilder {
             constants: Default::default(),
             field_map: Default::default(),
             method_map: Default::default(),
-            attribute_map: Default::default()
+            attribute_map: Default::default(),
         }
     }
 
@@ -79,32 +79,24 @@ impl ClassBuilder {
         let name = &method_builder.name;
 
         match self.method_map.get(name) {
-            None => { self.method_map.insert(name.clone(), HashMap::new()); },
+            None => {
+                self.method_map.insert(name.clone(), HashMap::new());
+            }
             Some(_) => {}
         };
-
-
 
         // self.method_map.get(&name).unwrap().insert(method_descriptor.into(), );
     }
 
     pub fn serialize(&mut self) -> Vec<u8> {
-        use byteorder::{ByteOrder, BigEndian};
-
         let this_class_utf8 = self.add_constant(Constant::Utf8(self.this_class.clone()));
-        let this_class_constant = self.add_constant(Constant::Class(
-            this_class_utf8
-        ));
+        let this_class_constant = self.add_constant(Constant::Class(this_class_utf8));
 
         let super_class_constant = match &self.super_class {
             None => 0,
             Some(super_class) => {
                 let super_class_utf8 = self.add_constant(Constant::Utf8(super_class.clone()));
-                self.add_constant(
-                    Constant::Class(
-                        super_class_utf8
-                    )
-                )
+                self.add_constant(Constant::Class(super_class_utf8))
             }
         };
 
@@ -132,14 +124,13 @@ impl ClassBuilder {
 
         cursor.into_inner()
     }
-
 }
 
 #[derive(Debug)]
 pub enum ClassError {
     FieldNotFound,
     MethodNotFound,
-    ConstantNotFound
+    ConstantNotFound,
 }
 
 impl Class {
@@ -148,44 +139,46 @@ impl Class {
     }
 
     pub fn get_method(&self, name: &str, descriptor: &str) -> Result<Arc<Method>, ClassError> {
-        self.method_map.get(&(name.into(), descriptor.into())).cloned().ok_or(ClassError::MethodNotFound)
+        self.method_map
+            .get(&(name.into(), descriptor.into()))
+            .cloned()
+            .ok_or(ClassError::MethodNotFound)
     }
 
     pub fn has_method(&self, name: &str, descriptor: &str) -> bool {
-        self.method_map.contains_key(&(name.into(), descriptor.into()))
+        self.method_map
+            .contains_key(&(name.into(), descriptor.into()))
     }
 }
 
 #[derive(Debug)]
 pub struct ObjectField {
     pub offset: isize,
-    pub info: FieldInfo
+    pub info: FieldInfo,
 }
 
 #[derive(PartialEq, Eq)]
 pub enum RefInfoType {
     MethodRef,
     FieldRef,
-    InterfaceMethodRef
+    InterfaceMethodRef,
 }
 
 pub struct RefInfo<'a> {
     pub class_name: &'a str,
     pub name: &'a str,
     pub descriptor: &'a str,
-    pub info_type: RefInfoType
+    pub info_type: RefInfoType,
 }
 
 #[derive(Debug)]
 pub struct ConstantPool {
-    pool: Vec<Constant>
+    pool: Vec<Constant>,
 }
 
 impl ConstantPool {
     pub fn new() -> Self {
-        ConstantPool {
-            pool: Vec::new()
-        }
+        ConstantPool { pool: Vec::new() }
     }
 
     pub fn get_vec(&self) -> &Vec<Constant> {
@@ -224,7 +217,9 @@ impl ConstantPool {
     }
 
     pub fn resolve_name_and_type(&self, index: u16) -> Option<(&str, &str)> {
-        if let Constant::NameAndType(name_index, descriptor_index) = self.pool.get(index as usize)? {
+        if let Constant::NameAndType(name_index, descriptor_index) =
+            self.pool.get(index as usize)?
+        {
             if let Constant::Utf8(name) = self.pool.get(*name_index as usize)? {
                 if let Constant::Utf8(descriptor) = self.pool.get(*descriptor_index as usize)? {
                     return Option::Some((name, descriptor));
@@ -245,9 +240,9 @@ impl ConstantPool {
                     class_name: class,
                     name: name_and_type.0,
                     descriptor: name_and_type.1,
-                    info_type: RefInfoType::MethodRef
+                    info_type: RefInfoType::MethodRef,
                 }
-            },
+            }
             Constant::FieldRef(class_index, name_and_type_index) => {
                 let class = self.resolve_class_info(*class_index)?;
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index)?;
@@ -256,9 +251,9 @@ impl ConstantPool {
                     class_name: class,
                     name: name_and_type.0,
                     descriptor: name_and_type.1,
-                    info_type: RefInfoType::MethodRef
+                    info_type: RefInfoType::MethodRef,
                 }
-            },
+            }
             Constant::InterfaceMethodRef(class_index, name_and_type_index) => {
                 let class = self.resolve_class_info(*class_index)?;
                 let name_and_type = self.resolve_name_and_type(*name_and_type_index)?;
@@ -267,10 +262,10 @@ impl ConstantPool {
                     class_name: class,
                     name: name_and_type.0,
                     descriptor: name_and_type.1,
-                    info_type: RefInfoType::MethodRef
+                    info_type: RefInfoType::MethodRef,
                 }
-            },
-            _ => return Option::None
+            }
+            _ => return Option::None,
         })
     }
 }
@@ -293,7 +288,7 @@ pub enum AccessFlags {
     NATIVE = 0x100,
     ABSTRACT = 0x400,
     STRICT = 0x800,
-    SYNTHETIC = 0x1000
+    SYNTHETIC = 0x1000,
 }
 
 impl AccessFlags {
@@ -314,7 +309,7 @@ pub struct Method {
     pub descriptor: String,
     pub descriptor_index: u16,
     pub attributes_count: u16,
-    pub attribute_map: HashMap<String, Attribute>
+    pub attribute_map: HashMap<String, Attribute>,
 }
 
 pub struct MethodBuilder {
@@ -322,7 +317,7 @@ pub struct MethodBuilder {
     pub name: String,
     pub descriptor: MethodDescriptor,
     pub attribute_map: HashMap<String, Attribute>,
-    pub instructions: Vec<Bytecode>
+    pub instructions: Vec<Bytecode>,
 }
 
 impl MethodBuilder {
@@ -332,7 +327,7 @@ impl MethodBuilder {
             name,
             descriptor,
             attribute_map: HashMap::new(),
-            instructions: Vec::new()
+            instructions: Vec::new(),
         }
     }
 
@@ -358,24 +353,23 @@ pub enum FieldDescriptor {
     /// String will be a classpath to a class
     ObjectType(String),
     //ArrayType will be an ArrayType struct containing the amount of dimensions and a FieldDescriptor that resolves to either BaseType or ObjectType
-    ArrayType(ArrayType)
+    ArrayType(ArrayType),
 }
 
 impl From<&FieldDescriptor> for String {
     fn from(fd: &FieldDescriptor) -> String {
         match &fd {
-            FieldDescriptor::BaseType(bt) => {
-                bt.into()
-            }
+            FieldDescriptor::BaseType(bt) => bt.into(),
             FieldDescriptor::ObjectType(class_name) => {
                 format!("L{};", class_name)
             }
             FieldDescriptor::ArrayType(array) => {
                 let fd: String = (&*array.field_descriptor).into();
 
-                (0..array.dimensions).map(|_| "[").collect::<String>().add(
-                    &fd
-                )
+                (0..array.dimensions)
+                    .map(|_| "[")
+                    .collect::<String>()
+                    .add(&fd)
             }
         }
     }
@@ -383,30 +377,41 @@ impl From<&FieldDescriptor> for String {
 
 impl FieldDescriptor {
     pub fn parse(desc: &str) -> Result<FieldDescriptor, ParseError> {
-        if "BCDFIJSZ".contains(&desc[0..1]) { //BaseType
-            return Ok(FieldDescriptor::BaseType(BaseType::get(&desc[0..1])?))
-        } else if &desc[0..1] == "L" { //ObjectType
-            return Ok(FieldDescriptor::ObjectType(String::from(&desc[1..desc.len()-1])))
-        } else if &desc[0..1] == "[" {//ArrayType
+        if "BCDFIJSZ".contains(&desc[0..1]) {
+            //BaseType
+            return Ok(FieldDescriptor::BaseType(BaseType::get(&desc[0..1])?));
+        } else if &desc[0..1] == "L" {
+            //ObjectType
+            return Ok(FieldDescriptor::ObjectType(String::from(
+                &desc[1..desc.len() - 1],
+            )));
+        } else if &desc[0..1] == "[" {
+            //ArrayType
             let mut dimensions: usize = 0;
             for i in 0..desc.len() {
-                if &desc[i..i+1] != "[" {
+                if &desc[i..i + 1] != "[" {
                     dimensions = i;
                     break;
-                } else if i == desc.len()-1 {
+                } else if i == desc.len() - 1 {
                     panic!("Invalid FieldDescriptor, no end of array type!");
                 }
             }
 
-            if "BCDFIJSZ".contains(&desc[dimensions..dimensions+1]) { //BaseType
+            if "BCDFIJSZ".contains(&desc[dimensions..dimensions + 1]) {
+                //BaseType
                 return Ok(FieldDescriptor::ArrayType(ArrayType {
                     dimensions: dimensions as u8,
-                    field_descriptor: Box::new(FieldDescriptor::BaseType(BaseType::get(&desc[dimensions..dimensions+1])?))
+                    field_descriptor: Box::new(FieldDescriptor::BaseType(BaseType::get(
+                        &desc[dimensions..dimensions + 1],
+                    )?)),
                 }));
-            } else if &desc[dimensions..dimensions+1] == "L" { //ObjectType
+            } else if &desc[dimensions..dimensions + 1] == "L" {
+                //ObjectType
                 return Ok(FieldDescriptor::ArrayType(ArrayType {
                     dimensions: dimensions as u8,
-                    field_descriptor: Box::new(FieldDescriptor::ObjectType(String::from(&desc[dimensions+1..desc.len()-1])))
+                    field_descriptor: Box::new(FieldDescriptor::ObjectType(String::from(
+                        &desc[dimensions + 1..desc.len() - 1],
+                    ))),
                 }));
             }
         }
@@ -416,19 +421,17 @@ impl FieldDescriptor {
 
     pub fn matches_operand(&self, operand: OperandType) -> bool {
         match self {
-            FieldDescriptor::BaseType(bt) => {
-                match bt {
-                    BaseType::Byte => operand == OperandType::Int,
-                    BaseType::Char => operand == OperandType::Char,
-                    BaseType::Double => operand == OperandType::Double,
-                    BaseType::Float => operand == OperandType::Float,
-                    BaseType::Int => operand == OperandType::Int,
-                    BaseType::Long => operand == OperandType::Long,
-                    BaseType::Reference => unreachable!("BaseType should not parse to a reference."),
-                    BaseType::Bool => operand == OperandType::Int,
-                    BaseType::Short => operand == OperandType::Int
-                }
-            }
+            FieldDescriptor::BaseType(bt) => match bt {
+                BaseType::Byte => operand == OperandType::Int,
+                BaseType::Char => operand == OperandType::Char,
+                BaseType::Double => operand == OperandType::Double,
+                BaseType::Float => operand == OperandType::Float,
+                BaseType::Int => operand == OperandType::Int,
+                BaseType::Long => operand == OperandType::Long,
+                BaseType::Reference => unreachable!("BaseType should not parse to a reference."),
+                BaseType::Bool => operand == OperandType::Int,
+                BaseType::Short => operand == OperandType::Int,
+            },
             FieldDescriptor::ObjectType(_) => {
                 if operand == OperandType::ClassReference {
                     true
@@ -450,14 +453,14 @@ impl FieldDescriptor {
 #[derive(Debug)]
 pub enum MethodReturnType {
     Void,
-    FieldDescriptor(FieldDescriptor)
+    FieldDescriptor(FieldDescriptor),
 }
 
 impl From<&MethodReturnType> for String {
     fn from(m: &MethodReturnType) -> Self {
         match m {
             MethodReturnType::Void => String::from("V"),
-            MethodReturnType::FieldDescriptor(fd) => fd.into()
+            MethodReturnType::FieldDescriptor(fd) => fd.into(),
         }
     }
 }
@@ -469,7 +472,7 @@ pub enum ParseError {
     IOError(std::io::Error),
     NoneError,
     StringError,
-    ClassError(ClassError)
+    ClassError(ClassError),
 }
 
 impl From<std::io::Error> for ParseError {
@@ -481,7 +484,7 @@ impl From<std::io::Error> for ParseError {
 #[derive(Debug)]
 pub struct MethodDescriptor {
     pub parameters: Vec<FieldDescriptor>,
-    pub return_type: MethodReturnType
+    pub return_type: MethodReturnType,
 }
 
 impl MethodDescriptor {
@@ -492,34 +495,38 @@ impl MethodDescriptor {
         let mut pos: usize = 1;
 
         while pos < input.len() {
-            if pos == params_end { break; }
+            if pos == params_end {
+                break;
+            }
 
-            if "BCDFIJSZ".contains(&input[pos..pos+1]) {
-                parameters.push(FieldDescriptor::parse(&input[pos..pos+1])?);
+            if "BCDFIJSZ".contains(&input[pos..pos + 1]) {
+                parameters.push(FieldDescriptor::parse(&input[pos..pos + 1])?);
                 pos += 1;
             } else {
                 let semicolon = (&input[pos..]).find(";");
 
                 let desc_end = match semicolon {
                     None => params_end,
-                    Some(s) => s
+                    Some(s) => s,
                 };
 
                 let end = desc_end + pos;
                 parameters.push(FieldDescriptor::parse(&input[pos..=end])?);
-                pos = end+1;
+                pos = end + 1;
             }
         }
 
         Ok(MethodDescriptor {
             parameters,
             return_type: {
-                if &input[input.len()-1..input.len()] == "V" {
+                if &input[input.len() - 1..input.len()] == "V" {
                     MethodReturnType::Void
                 } else {
-                    MethodReturnType::FieldDescriptor(FieldDescriptor::parse(&input[params_end+1..])?)
+                    MethodReturnType::FieldDescriptor(FieldDescriptor::parse(
+                        &input[params_end + 1..],
+                    )?)
                 }
-            }
+            },
         })
     }
 }
@@ -527,7 +534,12 @@ impl MethodDescriptor {
 impl From<&MethodDescriptor> for String {
     fn from(md: &MethodDescriptor) -> String {
         format!(
-            "({}){}", md.parameters.iter().map(|param| String::from(param)).collect::<String>(), String::from(&md.return_type)
+            "({}){}",
+            md.parameters
+                .iter()
+                .map(|param| String::from(param))
+                .collect::<String>(),
+            String::from(&md.return_type)
         )
     }
 }
@@ -542,7 +554,7 @@ pub enum BaseType {
     Long,
     Reference,
     Bool,
-    Short
+    Short,
 }
 
 impl BaseType {
@@ -556,39 +568,21 @@ impl BaseType {
             "J" => BaseType::Long,
             "S" => BaseType::Short,
             "Z" => BaseType::Bool,
-            _c => return Err(ParseError::InvalidBaseType)
+            _c => return Err(ParseError::InvalidBaseType),
         })
     }
 
     pub fn size_of(&self) -> usize {
         (match self {
-            BaseType::Byte => {
-                1
-            },
-            BaseType::Char => {
-                2
-            },
-            BaseType::Double => {
-                8
-            },
-            BaseType::Float => {
-                4
-            },
-            BaseType::Int => {
-                4
-            },
-            BaseType::Long => {
-                8
-            },
-            BaseType::Reference => {
-                size_of::<usize>()
-            },
-            BaseType::Bool => {
-                1
-            },
-            BaseType::Short => {
-                2
-            }
+            BaseType::Byte => 1,
+            BaseType::Char => 2,
+            BaseType::Double => 8,
+            BaseType::Float => 4,
+            BaseType::Int => 4,
+            BaseType::Long => 8,
+            BaseType::Reference => size_of::<usize>(),
+            BaseType::Bool => 1,
+            BaseType::Short => 2,
         }) as usize
     }
 }
@@ -604,7 +598,7 @@ impl Into<String> for &BaseType {
             BaseType::Long => String::from("J"),
             BaseType::Short => String::from("S"),
             BaseType::Bool => String::from("Z"),
-            BaseType::Reference => String::from("L") //???
+            BaseType::Reference => String::from("L"), //???
         }
     }
 }
@@ -612,11 +606,14 @@ impl Into<String> for &BaseType {
 #[derive(Debug)]
 pub struct ArrayType {
     pub field_descriptor: Box<FieldDescriptor>,
-    pub dimensions: u8
+    pub dimensions: u8,
 }
 
 impl Method {
-    pub fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Result<Self, ParseError> {
+    pub fn from_bytes<R: Read + Seek>(
+        rdr: &mut R,
+        constant_pool: &ConstantPool,
+    ) -> Result<Self, ParseError> {
         let attr_count: u16;
         let n_index;
         let d_index;
@@ -627,20 +624,24 @@ impl Method {
                 n_index = rdr.read_u16::<BigEndian>()?;
                 n_index
             },
-            name:
-                match constant_pool.get(n_index as usize).ok_or(ParseError::ClassError(ClassError::ConstantNotFound))? {
-                    Constant::Utf8(string) => String::from(string),
-                    _ => panic!("Expected UTF8 for method name")
-                },
+            name: match constant_pool
+                .get(n_index as usize)
+                .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?
+            {
+                Constant::Utf8(string) => String::from(string),
+                _ => panic!("Expected UTF8 for method name"),
+            },
             descriptor_index: {
                 d_index = rdr.read_u16::<BigEndian>()?;
                 d_index
             },
-            descriptor:
-                match constant_pool.get(d_index as usize).ok_or(ParseError::ClassError(ClassError::ConstantNotFound))? {
-                    Constant::Utf8(string) => String::from(string),
-                    _ => panic!("Expected UTF8 for descriptor")
-                },
+            descriptor: match constant_pool
+                .get(d_index as usize)
+                .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?
+            {
+                Constant::Utf8(string) => String::from(string),
+                _ => panic!("Expected UTF8 for descriptor"),
+            },
             attributes_count: {
                 attr_count = rdr.read_u16::<BigEndian>()?;
                 attr_count
@@ -654,7 +655,7 @@ impl Method {
                 }
 
                 attr_map
-            }
+            },
         })
     }
 }
@@ -664,20 +665,29 @@ pub struct FieldInfo {
     pub access_flags: u16,
     pub name: String,
     pub field_descriptor: FieldDescriptor,
-    pub attribute_map: HashMap<String, Attribute>
+    pub attribute_map: HashMap<String, Attribute>,
 }
 
 impl FieldInfo {
-    pub fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Result<Self, ParseError> {
+    pub fn from_bytes<R: Read + Seek>(
+        rdr: &mut R,
+        constant_pool: &ConstantPool,
+    ) -> Result<Self, ParseError> {
         Ok(FieldInfo {
             access_flags: rdr.read_u16::<BigEndian>()?,
-            name: match constant_pool.get(rdr.read_u16::<BigEndian>()? as usize).ok_or(ParseError::ClassError(ClassError::ConstantNotFound))? {
+            name: match constant_pool
+                .get(rdr.read_u16::<BigEndian>()? as usize)
+                .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?
+            {
                 Constant::Utf8(str) => str.clone(),
-                _ => panic!("Name index did not resolve to a UTF8 constant!")
+                _ => panic!("Name index did not resolve to a UTF8 constant!"),
             },
-            field_descriptor: match constant_pool.get(rdr.read_u16::<BigEndian>()? as usize).ok_or(ParseError::ClassError(ClassError::ConstantNotFound))? {
+            field_descriptor: match constant_pool
+                .get(rdr.read_u16::<BigEndian>()? as usize)
+                .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?
+            {
                 Constant::Utf8(string) => FieldDescriptor::parse(&string)?,
-                _ => panic!("Descriptor must be UTF8!")
+                _ => panic!("Descriptor must be UTF8!"),
             },
             attribute_map: {
                 let mut attr_map: HashMap<String, Attribute> = HashMap::new();
@@ -688,7 +698,7 @@ impl FieldInfo {
                 }
 
                 attr_map
-            }
+            },
         })
     }
 }
@@ -698,34 +708,41 @@ impl FieldInfo {
 //for the JVM, ironically, because Annotations are actually a form of attribute at compile-time.
 pub mod attribute {
     use crate::vm::class::attribute::stackmap::StackMapFrame;
+    use crate::vm::class::constant::Constant;
+    use crate::vm::class::{ClassError, ConstantPool, ParseError};
+    use byteorder::{BigEndian, ReadBytesExt};
     use std::io::{Read, Seek, SeekFrom};
-    use byteorder::{ReadBytesExt, BigEndian};
-    use crate::vm::class::constant::{Constant};
-    use crate::vm::class::{ConstantPool, ParseError, ClassError};
-    
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     #[derive(Debug)]
     pub struct Attribute {
         pub attribute_name: String,
-        pub info: AttributeItem
+        pub info: AttributeItem,
     }
 
     impl Attribute {
-        pub fn from_bytes<R: Read + Seek>(rdr: &mut R, constant_pool: &ConstantPool) -> Result<Self, ParseError> {
+        pub fn from_bytes<R: Read + Seek>(
+            rdr: &mut R,
+            constant_pool: &ConstantPool,
+        ) -> Result<Self, ParseError> {
             let start_pos = rdr.stream_position()?;
 
             let attribute_name_index = rdr.read_u16::<BigEndian>()?;
             let length = rdr.read_u32::<BigEndian>()?;
 
-            let _max_pos = start_pos+(length as u64)+6; //in bytes
+            let _max_pos = start_pos + (length as u64) + 6; //in bytes
 
-            let attribute_constant: &Constant = constant_pool.get(attribute_name_index as usize).ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?;
+            let attribute_constant: &Constant = constant_pool
+                .get(attribute_name_index as usize)
+                .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?;
 
             let utf8_string = match attribute_constant {
                 Constant::Utf8(string) => string,
                 _ => {
-                    println!("Constant (index: {}) must be UTF8 in the constant pool!", attribute_name_index);
+                    println!(
+                        "Constant (index: {}) must be UTF8 in the constant pool!",
+                        attribute_name_index
+                    );
                     panic!("error");
                 }
             };
@@ -734,7 +751,7 @@ pub mod attribute {
                 attribute_name: String::from(utf8_string),
                 info: match &utf8_string[..] {
                     "ConstantValue" => AttributeItem::ConstantValue(ConstantValue {
-                        constant_value_index: rdr.read_u16::<BigEndian>()?
+                        constant_value_index: rdr.read_u16::<BigEndian>()?,
                     }),
                     "Code" => AttributeItem::Code({
                         let code_len: u32;
@@ -767,7 +784,7 @@ pub mod attribute {
                                         start_pc: rdr.read_u16::<BigEndian>()?,
                                         end_pc: rdr.read_u16::<BigEndian>()?,
                                         handler_pc: rdr.read_u16::<BigEndian>()?,
-                                        catch_type: rdr.read_u16::<BigEndian>()?
+                                        catch_type: rdr.read_u16::<BigEndian>()?,
                                     });
                                 }
                                 vec
@@ -782,14 +799,14 @@ pub mod attribute {
                                     vec.push(Attribute::from_bytes(rdr, constant_pool)?);
                                 }
                                 vec
-                            }
+                            },
                         }
                     }),
                     _ => {
                         rdr.seek(SeekFrom::Current(length as i64));
                         AttributeItem::Unimplemented
                     }
-                }
+                },
             };
 
             // if rdr.stream_position() > max_pos {
@@ -820,16 +837,17 @@ pub mod attribute {
         Deprecated(Deprecated),
         RuntimeVisibleAnnotations(RuntimeVisibleAnnotations),
         Annotation(Annotation),
-        Unimplemented
+        Unimplemented,
     }
 
     #[derive(Debug)]
     pub struct ConstantValue {
-        constant_value_index: u16
+        constant_value_index: u16,
     }
 
     #[derive(Debug)]
-    pub struct Code { //This contains the executable bytecodes of a method
+    pub struct Code {
+        //This contains the executable bytecodes of a method
         max_stack: u16,
         max_locals: u16,
         code_length: u32,
@@ -837,7 +855,7 @@ pub mod attribute {
         exception_table_length: u16,
         exception_table: Vec<CodeExceptionTable>,
         attributes_count: u16,
-        attributes: Vec<Attribute>
+        attributes: Vec<Attribute>,
     }
 
     #[derive(Debug)]
@@ -845,10 +863,11 @@ pub mod attribute {
         start_pc: u16,
         end_pc: u16,
         handler_pc: u16,
-        catch_type: u16
+        catch_type: u16,
     }
 
-    pub mod stackmap { //TODO: complete this? https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7.4
+    pub mod stackmap {
+        //TODO: complete this? https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7.4
         // pub struct StackMapTable {
         //     attribute_name_index: u16,
         //     attribute_length: u32,
@@ -864,25 +883,23 @@ pub mod attribute {
             ChopFrame,
             SameFrameExtended,
             AppendFrame,
-            FullFrame
+            FullFrame,
         }
 
         #[derive(Debug)]
-        pub struct SameFrame {
-
-        }
+        pub struct SameFrame {}
     }
 
     #[derive(Debug)]
     pub struct Exceptions {
         number_of_exceptions: u16,
-        exception_table_index: Vec<u16>
+        exception_table_index: Vec<u16>,
     }
 
     #[derive(Debug)]
     pub struct InnerClasses {
         number_of_classes: u16,
-        classes: Vec<InnerClassEntry>
+        classes: Vec<InnerClassEntry>,
     }
 
     #[derive(Debug)]
@@ -890,13 +907,13 @@ pub mod attribute {
         inner_class_info_index: u16,
         outer_class_info_index: u16,
         inner_name_index: u16,
-        inner_class_access_flags: u16
+        inner_class_access_flags: u16,
     }
 
     #[derive(Debug)]
     pub struct EnclosingMethod {
         class_index: u16,
-        method_index: u16
+        method_index: u16,
     }
 
     #[derive(Debug)]
@@ -904,35 +921,35 @@ pub mod attribute {
 
     #[derive(Debug)]
     pub struct Signature {
-        signature_index: u16
+        signature_index: u16,
     }
 
     #[derive(Debug)]
     pub struct SourceFile {
-        sourcefile_index: u16
+        sourcefile_index: u16,
     }
 
     #[derive(Debug)]
     pub struct SourceDebugExtension {
-        debug_extension: Vec<u8>
+        debug_extension: Vec<u8>,
     }
 
     #[derive(Debug)]
     pub struct LineNumberTable {
         line_number_table_length: u16,
-        line_number_table: Vec<LineNumberTableEntry>
+        line_number_table: Vec<LineNumberTableEntry>,
     }
 
     #[derive(Debug)]
     pub struct LineNumberTableEntry {
         start_pc: u16,
-        line_number: u16
+        line_number: u16,
     }
 
     #[derive(Debug)]
     pub struct LocalVariableTable {
         local_variable_table_length: u16,
-        local_variable_table: Vec<LocalVariableTableEntry>
+        local_variable_table: Vec<LocalVariableTableEntry>,
     }
 
     #[derive(Debug)]
@@ -941,7 +958,7 @@ pub mod attribute {
         length: u16,
         name_index: u16,
         descriptor_index: u16,
-        index: u16
+        index: u16,
     }
 
     // pub struct LocalVariableTypeTable {
@@ -955,7 +972,7 @@ pub mod attribute {
         length: u16,
         name_index: u16,
         signature_index: u16,
-        index: u16
+        index: u16,
     }
 
     #[derive(Debug)]
@@ -964,20 +981,20 @@ pub mod attribute {
     #[derive(Debug)]
     pub struct RuntimeVisibleAnnotations {
         num_annotations: u16,
-        annotations: Vec<Annotation>
+        annotations: Vec<Annotation>,
     }
 
     #[derive(Debug)]
     pub struct Annotation {
         type_index: u16,
         num_element_value_pairs: u16,
-        element_value_pairs: Vec<AnnotationElementValuePair>
+        element_value_pairs: Vec<AnnotationElementValuePair>,
     }
 
     #[derive(Debug)]
     pub struct ElementValue {
         tag: u8,
-        value: ElementValueUnion
+        value: ElementValueUnion,
     }
 
     #[derive(Debug)]
@@ -986,13 +1003,13 @@ pub mod attribute {
     }
 
     #[derive(Debug)]
-    pub struct AnnotationElementValuePair (u16, ElementValue);
+    pub struct AnnotationElementValuePair(u16, ElementValue);
 }
 
 pub mod constant {
-    use std::io::{Read, Seek};
-    use byteorder::{ReadBytesExt, BigEndian};
     use crate::vm::class::{ConstantPool, ParseError};
+    use byteorder::{BigEndian, ReadBytesExt};
+    use std::io::{Read, Seek};
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4
     #[repr(u8)]
@@ -1030,7 +1047,7 @@ pub mod constant {
                 PoolTag::NameAndType => 12,
                 PoolTag::MethodHandle => 15,
                 PoolTag::MethodType => 16,
-                PoolTag::InvokeDynamic => 18
+                PoolTag::InvokeDynamic => 18,
             }
         }
     }
@@ -1044,14 +1061,14 @@ pub mod constant {
     impl From<u8> for PoolTag {
         fn from(you_ate: u8) -> Self {
             match you_ate {
-                1  => Self::Utf8,
-                3  => Self::Integer,
-                4  => Self::Float,
-                5  => Self::Long,
-                6  => Self::Double,
-                7  => Self::Class,
-                8  => Self::String,
-                9  => Self::FieldRef,
+                1 => Self::Utf8,
+                3 => Self::Integer,
+                4 => Self::Float,
+                5 => Self::Long,
+                6 => Self::Double,
+                7 => Self::Class,
+                8 => Self::String,
+                9 => Self::FieldRef,
                 10 => Self::MethodRef,
                 11 => Self::InterfaceMethodRef,
                 12 => Self::NameAndType,
@@ -1077,23 +1094,26 @@ pub mod constant {
         ///string_index
         String(u16),
         ///class_index, name_and_type_index
-        FieldRef(u16,u16),
+        FieldRef(u16, u16),
         ///class_index, name_and_type_index
         MethodRef(u16, u16),
         ///class_index, name_and_type_index
         InterfaceMethodRef(u16, u16),
         ///name_index, descriptor_index
-        NameAndType(u16,u16),
+        NameAndType(u16, u16),
         ///reference_king, reference_index
-        MethodHandle(u8,u16),
+        MethodHandle(u8, u16),
         ///descriptor_index
         MethodType(u16),
         ///bootstrap_method_attr_index, name_and_type_index
-        InvokeDynamic(u16, u16)
+        InvokeDynamic(u16, u16),
     }
 
     impl Constant {
-        pub fn from_bytes<R: Read + Seek>(rdr: &mut R, _constant_pool: &ConstantPool) -> Result<Constant, ParseError> {
+        pub fn from_bytes<R: Read + Seek>(
+            rdr: &mut R,
+            _constant_pool: &ConstantPool,
+        ) -> Result<Constant, ParseError> {
             let tag = rdr.read_u8()?;
             let as_pool_tag: PoolTag = tag.into();
 
@@ -1105,22 +1125,35 @@ pub mod constant {
                         buf.push(rdr.read_u8()?);
                     }
                     Constant::Utf8(String::from_utf8(buf).map_err(|_| ParseError::StringError)?)
-                },
+                }
                 PoolTag::Integer => Constant::Integer(rdr.read_i32::<BigEndian>()?),
                 PoolTag::Float => Constant::Float(rdr.read_f32::<BigEndian>()?),
                 PoolTag::Long => Constant::Long(rdr.read_i64::<BigEndian>()?),
-                PoolTag::Double => Constant::Double(
-                    rdr.read_f64::<BigEndian>()?
-                ),
+                PoolTag::Double => Constant::Double(rdr.read_f64::<BigEndian>()?),
                 PoolTag::Class => Constant::Class(rdr.read_u16::<BigEndian>()?),
                 PoolTag::String => Constant::String(rdr.read_u16::<BigEndian>()?),
-                PoolTag::FieldRef => Constant::FieldRef(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?),
-                PoolTag::MethodRef => Constant::MethodRef(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?),
-                PoolTag::InterfaceMethodRef => Constant::InterfaceMethodRef(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?),
-                PoolTag::NameAndType => Constant::NameAndType(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?),
-                PoolTag::MethodHandle => Constant::MethodHandle(rdr.read_u8()?, rdr.read_u16::<BigEndian>()?),
+                PoolTag::FieldRef => {
+                    Constant::FieldRef(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?)
+                }
+                PoolTag::MethodRef => {
+                    Constant::MethodRef(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?)
+                }
+                PoolTag::InterfaceMethodRef => Constant::InterfaceMethodRef(
+                    rdr.read_u16::<BigEndian>()?,
+                    rdr.read_u16::<BigEndian>()?,
+                ),
+                PoolTag::NameAndType => Constant::NameAndType(
+                    rdr.read_u16::<BigEndian>()?,
+                    rdr.read_u16::<BigEndian>()?,
+                ),
+                PoolTag::MethodHandle => {
+                    Constant::MethodHandle(rdr.read_u8()?, rdr.read_u16::<BigEndian>()?)
+                }
                 PoolTag::MethodType => Constant::MethodType(rdr.read_u16::<BigEndian>()?),
-                PoolTag::InvokeDynamic => Constant::InvokeDynamic(rdr.read_u16::<BigEndian>()?, rdr.read_u16::<BigEndian>()?)
+                PoolTag::InvokeDynamic => Constant::InvokeDynamic(
+                    rdr.read_u16::<BigEndian>()?,
+                    rdr.read_u16::<BigEndian>()?,
+                ),
             })
         }
 
@@ -1133,13 +1166,46 @@ pub mod constant {
                 Constant::Double(double) => double.to_be_bytes().iter().cloned().collect(),
                 Constant::Class(index) => index.to_be_bytes().iter().cloned().collect(),
                 Constant::String(index) => index.to_be_bytes().iter().cloned().collect(),
-                Constant::FieldRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()].into_iter().flatten().cloned().collect::<Vec<u8>>(),
-                Constant::MethodRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()].into_iter().flatten().cloned().collect::<Vec<u8>>(),
-                Constant::InterfaceMethodRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()].into_iter().flatten().cloned().collect::<Vec<u8>>(),
-                Constant::NameAndType(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()].into_iter().flatten().cloned().collect::<Vec<u8>>(),
-                Constant::MethodHandle(index1, index2) => [*index1, *index2.to_be_bytes().get(0).unwrap(), *index2.to_be_bytes().get(1).unwrap()].into_iter().cloned().collect::<Vec<u8>>(),
+                Constant::FieldRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()]
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<u8>>(),
+                Constant::MethodRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()]
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .collect::<Vec<u8>>(),
+                Constant::InterfaceMethodRef(index1, index2) => {
+                    [index1.to_be_bytes(), index2.to_be_bytes()]
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<u8>>()
+                }
+                Constant::NameAndType(index1, index2) => {
+                    [index1.to_be_bytes(), index2.to_be_bytes()]
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<u8>>()
+                }
+                Constant::MethodHandle(index1, index2) => [
+                    *index1,
+                    *index2.to_be_bytes().get(0).unwrap(),
+                    *index2.to_be_bytes().get(1).unwrap(),
+                ]
+                .iter()
+                .cloned()
+                .collect::<Vec<u8>>(),
                 Constant::MethodType(index) => index.to_be_bytes().iter().cloned().collect(),
-                Constant::InvokeDynamic(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()].into_iter().flatten().cloned().collect::<Vec<u8>>(),
+                Constant::InvokeDynamic(index1, index2) => {
+                    [index1.to_be_bytes(), index2.to_be_bytes()]
+                        .iter()
+                        .flatten()
+                        .cloned()
+                        .collect::<Vec<u8>>()
+                }
             };
 
             vec.reverse();
@@ -1157,7 +1223,7 @@ pub mod constant {
                 Constant::NameAndType(_, _) => 12,
                 Constant::MethodHandle(_, _) => 15,
                 Constant::MethodType(_) => 16,
-                Constant::InvokeDynamic(_, _) => 18
+                Constant::InvokeDynamic(_, _) => 18,
             });
 
             vec.reverse();
