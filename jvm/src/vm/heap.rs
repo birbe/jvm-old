@@ -4,7 +4,7 @@ use core::mem;
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::mem::size_of;
+use std::mem::{align_of, size_of};
 use std::ptr;
 
 use sharded_slab::Slab;
@@ -71,9 +71,13 @@ impl Heap {
 
     pub fn allocate(&self, size: usize) -> *mut u8 {
         unsafe {
-            self.raw
-                .ptr
-                .offset(self.raw.used.fetch_add(size, Ordering::AcqRel).try_into().unwrap())
+            self.raw.ptr.offset(
+                self.raw
+                    .used
+                    .fetch_add(size, Ordering::AcqRel)
+                    .try_into()
+                    .unwrap(),
+            )
         }
     }
 
@@ -88,7 +92,7 @@ impl Heap {
     pub fn create_object(&self, class: Arc<Class>) -> Result<usize, JvmError> {
         let object = Object {
             ptr: self.allocate_class(class.clone()),
-            class
+            class,
         };
 
         self.objects.insert(object).ok_or(JvmError::HeapFull)
@@ -108,7 +112,7 @@ impl Heap {
         let field_offset = class.field_map.get(field);
 
         unsafe {
-            let offset_ptr = ptr.offset(field_offset.unwrap().offset as isize) as *mut T;
+            let offset_ptr = ptr.offset(field_offset.unwrap().offset) as *mut T;
 
             *offset_ptr = value;
         }
@@ -117,23 +121,17 @@ impl Heap {
     pub fn allocate_array(&self, intern_type: InternArrayType, length: u32) -> *mut ArrayHeader {
         let id = InternArrayType::convert_to_u8(intern_type);
 
-        let header = Layout::new::<ArrayHeader>().align_to(4).unwrap();
+        let header = Layout::new::<ArrayHeader>()
+            .align_to(align_of::<usize>())
+            .unwrap();
         let body = Layout::array::<u8>(length as usize)
             .unwrap()
-            .align_to(4)
+            .align_to(size_of::<usize>() * 2)
             .unwrap();
 
         let (layout, offset) = header.extend(body).unwrap();
 
-        // assert_eq!(offset, mem::size_of::<ArrayHeader>());
-        // assert!(length < u16::MAX as usize);
-
         unsafe {
-            // let ptr = self
-            //     .raw
-            //     .ptr
-            //     .offset(self.raw.used.fetch_add(layout.size(), Ordering::Relaxed) as isize);
-
             let ptr = alloc(layout);
 
             if ptr.is_null() {
@@ -160,10 +158,18 @@ impl Heap {
 
     pub fn allocate_chars(&self, string: &str) -> *mut ArrayHeader {
         let char_vec: Vec<u16> = string.encode_utf16().collect();
-        let header = self.allocate_array(InternArrayType::Char, (char_vec.len() * std::mem::size_of::<u16>()).try_into().unwrap());
+        let header = self.allocate_array(
+            InternArrayType::Char,
+            (char_vec.len() * std::mem::size_of::<u16>())
+                .try_into()
+                .unwrap(),
+        );
         unsafe {
             let (arr_header, arr_body) = Self::get_array::<u16>(header as *mut u8);
-            assert_eq!((char_vec.len() * size_of::<u16>()) as u32, (*arr_header).size);
+            assert_eq!(
+                (char_vec.len() * size_of::<u16>()) as u32,
+                (*arr_header).size
+            );
             ptr::copy(char_vec.as_ptr(), arr_body, char_vec.len());
 
             arr_header
