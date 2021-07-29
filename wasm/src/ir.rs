@@ -439,7 +439,7 @@ impl ControlFlow {
             bytecode: Vec::new(),
         };
 
-        let bytecodes = Bytecode::from_bytes_with_indices(0, &bytecode).ok()?;
+        let bytecodes = Bytecode::from_bytes_with_indices(0, bytecode).ok()?;
 
         bytecodes.into_iter().for_each(|(bytecode, index)| {
             let _length = Bytecode::size_of(&bytecode);

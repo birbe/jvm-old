@@ -67,7 +67,9 @@ impl VirtualMachine {
 
         let string_arr_ptr = self.heap.allocate_array(
             InternArrayType::ClassReference,
-            (args.len() * std::mem::size_of::<usize>()).try_into().unwrap() ,
+            (args.len() * std::mem::size_of::<usize>())
+                .try_into()
+                .unwrap(),
         );
 
         let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
@@ -88,7 +90,7 @@ impl VirtualMachine {
                 )?;
 
                 unsafe {
-                    *body.offset(index as isize) = allocated_string as usize;
+                    *body.offset(index.try_into().unwrap()) = allocated_string as usize;
                 }
 
                 index += 1;
@@ -262,11 +264,17 @@ impl LocalVariableMap {
     }
 
     fn get(&self, key: &u16) -> Option<&Type> {
-        self.map.get(&key)
+        self.map.get(key)
     }
 
     fn contains_key(&self, key: u16) -> bool {
         self.map.contains_key(&key)
+    }
+}
+
+impl Default for LocalVariableMap {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -429,7 +437,7 @@ impl RuntimeThread {
         };
 
         Frame {
-            class: class.clone(),
+            class,
             code: code_cursor,
             method_name: method.name.clone(),
             local_vars: LocalVariableMap::new(),
@@ -653,10 +661,12 @@ impl RuntimeThread {
             0x2a..=0x2d => {
                 let index = opcode - 0x2a;
 
-                let var = frame.local_vars.get(&(index as u16)).expect(&format!(
-                    "Class: {}\nMethod: {}\nIndex: {}",
-                    frame.class.this_class, frame.method_name, opcode_pos
-                ));
+                let var = frame.local_vars.get(&(index as u16)).unwrap_or_else(|| {
+                    panic!(
+                        "Class: {}\nMethod: {}\nIndex: {}",
+                        frame.class.this_class, frame.method_name, opcode_pos
+                    )
+                });
 
                 if let Type::Reference(reference) = var {
                     match reference {
@@ -683,7 +693,8 @@ impl RuntimeThread {
                 let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as usize;
 
                 unsafe {
-                    let float = (arr_ptr.offset((size_of::<f32>() * index) as isize)) as *mut f32;
+                    let float = (arr_ptr.offset((size_of::<f32>() * index).try_into().unwrap()))
+                        as *mut f32;
                     frame
                         .op_stack
                         .push(Operand(OperandType::Float, *float as usize));
@@ -695,8 +706,8 @@ impl RuntimeThread {
                 let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as usize;
 
                 unsafe {
-                    let double =
-                        *((arr_ptr.offset((size_of::<u64>() * index) as isize)) as *mut u64);
+                    let double = *((arr_ptr.offset((size_of::<u64>() * index).try_into().unwrap()))
+                        as *mut u64);
 
                     let dhalf1 = (double >> 32) as u32 as usize;
                     let dhalf2 = double as u32 as usize;
@@ -707,7 +718,13 @@ impl RuntimeThread {
             }
             0x32 => {
                 //aaload (load reference from an array)
-                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as isize;
+                let index: isize = frame
+                    .op_stack
+                    .pop()
+                    .ok_or(JvmError::EmptyOperandStack)?
+                    .1
+                    .try_into()
+                    .unwrap();
                 let arr_ptr = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1 as *mut u8;
 
                 let (header, body) = unsafe { Heap::get_array::<usize>(arr_ptr) };
@@ -721,7 +738,8 @@ impl RuntimeThread {
                     _ => panic!("Reference in array was not a reference."),
                 };
 
-                let element = unsafe { body.offset(size_of::<usize>() as isize * index) };
+                let usize_size: isize = size_of::<usize>().try_into().unwrap();
+                let element = unsafe { body.offset(usize_size * index) };
 
                 frame.op_stack.push(Operand(ref_type, element as usize));
             }
@@ -732,7 +750,7 @@ impl RuntimeThread {
 
                 let (_, ptr) = unsafe { Heap::get_array::<u16>(arrayref.1 as *mut u8) };
 
-                let val = unsafe { *ptr.offset(index.1 as isize) };
+                let val = unsafe { *ptr.offset(index.1.try_into().unwrap()) };
                 frame.op_stack.push(Operand(OperandType::Int, val as usize));
             }
             //istore_<n>
@@ -771,7 +789,7 @@ impl RuntimeThread {
 
                 unsafe {
                     let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
-                    let offset = ptr.offset(index.1 as isize);
+                    let offset = ptr.offset(index.1.try_into().unwrap());
                     *offset = val.1 as u16;
                 }
             }
@@ -787,7 +805,7 @@ impl RuntimeThread {
             //dup
             0x59 => {
                 let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                frame.op_stack.push(op.clone());
+                frame.op_stack.push(op);
                 frame.op_stack.push(op);
             }
             0x60 => {
@@ -1175,11 +1193,6 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let class = self
-                    .classloader
-                    .read()?
-                    .get_class(&fieldref.class_name)
-                    .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
 
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
@@ -1190,21 +1203,19 @@ impl RuntimeThread {
                     .ok_or(JvmError::InvalidObjectReference)?;
 
                 let reference = object
-                    .get_field(&fieldref.name)
-                    .ok_or(JvmError::InvalidObjectField(String::from(
-                        fieldref.name.clone(),
-                    )))?
+                    .get_field(fieldref.name)
+                    .ok_or_else(|| JvmError::InvalidObjectField(String::from(fieldref.name)))?
                     .as_reference()
                     .ok_or(JvmError::InvalidObjectReference)?;
 
-                let fd = FieldDescriptor::parse(&fieldref.descriptor)?;
+                let fd = FieldDescriptor::parse(fieldref.descriptor)?;
 
                 let operand = match fd {
                     FieldDescriptor::JavaType(base_type) => {
-                        Operand(OperandType::from_base_type(base_type), unsafe { reference })
+                        Operand(OperandType::from_base_type(base_type), reference)
                     }
                     FieldDescriptor::ObjectType(_object_type) => {
-                        Operand(OperandType::ClassReference, unsafe { reference })
+                        Operand(OperandType::ClassReference, reference)
                     }
                     FieldDescriptor::ArrayType(_) => panic!("Not allowed."),
                 };
@@ -1226,12 +1237,12 @@ impl RuntimeThread {
                 let classloader_read = classloader_arc.read()?; //Bypass the borrow checker
 
                 let class = classloader_read
-                    .get_class(&fieldref.class_name)
+                    .get_class(fieldref.class_name)
                     .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
                     .or_else(|_| {
                         self.classloader
                             .write()?
-                            .load_and_link_class(&fieldref.class_name)
+                            .load_and_link_class(fieldref.class_name)
                             .map(|class| class.1)
                     })?;
 
@@ -1239,7 +1250,7 @@ impl RuntimeThread {
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
                 self.heap
-                    .put_field(object_ref, class, &fieldref.name, value.1);
+                    .put_field(object_ref, class, fieldref.name, value.1);
             }
             //invokevirtual
             0xb6 => {
@@ -1251,7 +1262,7 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor)?;
+                let method_descriptor = MethodDescriptor::parse(method_ref.descriptor)?;
 
                 let param_len = method_descriptor.parameters.len();
 
@@ -1266,7 +1277,7 @@ impl RuntimeThread {
                         .get(i)
                         .ok_or(JvmError::EmptyOperandStack)?;
 
-                    if !descriptor.matches_operand(param.0.clone()) {
+                    if !descriptor.matches_operand(param.0) {
                         panic!("Operand did not match parameter requirements.");
                     }
 
@@ -1291,18 +1302,18 @@ impl RuntimeThread {
                 let class = self
                     .classloader
                     .read()?
-                    .get_class(&method_ref.class_name)
+                    .get_class(method_ref.class_name)
                     .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
                     .or_else(|_| {
                         self.classloader
                             .write()?
-                            .load_and_link_class(&method_ref.class_name)
+                            .load_and_link_class(method_ref.class_name)
                             .map(|class| class.1)
                     })?;
                 //Attempts to simply read from the classloader and get the class. If this was not
                 //possible, attempt to load the class. Otherwise, return an error.
 
-                let method = class.get_method(&method_ref.name, &method_ref.descriptor)?;
+                let method = class.get_method(method_ref.name, method_ref.descriptor)?;
 
                 let method_descriptor = MethodDescriptor::parse(&method.descriptor)?;
 
@@ -1331,27 +1342,19 @@ impl RuntimeThread {
                             if at.dimensions == 1 {
                                 if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
                                     if ot == "java/lang/Object" {
-                                        if let MethodReturnType::FieldDescriptor(return_fd) =
-                                            method_descriptor.return_type
-                                        {
-                                            if let FieldDescriptor::ObjectType(return_ot) =
-                                                return_fd
-                                            {
-                                                if return_ot == "java/lang/Object" {
-                                                    if method.access_flags & 0x180 == 0x180 {
-                                                        //NATIVE | VARARGS == 0x180
-                                                        true
-                                                    } else {
-                                                        false
+                                        match method_descriptor.return_type {
+                                            MethodReturnType::FieldDescriptor(return_fd) => {
+                                                match return_fd {
+                                                    FieldDescriptor::ObjectType(return_ot)
+                                                        if return_ot == "java/lang/Object" =>
+                                                    {
+                                                        method.access_flags & 0x180 == 0x180
                                                     }
-                                                } else {
-                                                    false
+
+                                                    _ => false,
                                                 }
-                                            } else {
-                                                false
                                             }
-                                        } else {
-                                            false
+                                            _ => false,
                                         }
                                     } else {
                                         false
@@ -1409,32 +1412,32 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let method_descriptor = MethodDescriptor::parse(&method_ref.descriptor)?;
+                let method_descriptor = MethodDescriptor::parse(method_ref.descriptor)?;
 
                 // println!("{}", method_d);
 
                 let method_class = self
                     .classloader
                     .read()?
-                    .get_class(&method_ref.class_name)
+                    .get_class(method_ref.class_name)
                     .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
                     .or_else(|_| {
                         self.classloader
                             .write()?
-                            .load_and_link_class(&method_ref.class_name)
+                            .load_and_link_class(method_ref.class_name)
                             .map(|class| class.1)
                     })?;
 
                 let classloader = self.classloader.read()?;
 
                 let resolved_method =
-                    method_class.get_method(&method_ref.name, &method_ref.descriptor)?;
-                let to_invoke: (Arc<Class>, Arc<Method>) = if {
-                    (method_class.access_flags & 0x20 == 0x20)
-                        && classloader
-                            .recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
-                        && resolved_method.name != "<init>"
-                } {
+                    method_class.get_method(method_ref.name, method_ref.descriptor)?;
+                let to_invoke: (Arc<Class>, Arc<Method>) = if (method_class.access_flags & 0x20
+                    == 0x20)
+                    && classloader
+                        .recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
+                    && resolved_method.name != "<init>"
+                {
                     classloader
                         .recurse_resolve_supermethod_special(
                             classloader
@@ -1459,7 +1462,7 @@ impl RuntimeThread {
                         .get(i)
                         .ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?;
 
-                    if !descriptor.matches_operand(param.0.clone()) {
+                    if !descriptor.matches_operand(param.0) {
                         panic!("Operand did not match parameter requirements.");
                     }
 
@@ -1489,12 +1492,12 @@ impl RuntimeThread {
 
                 let classloader = self.classloader.read()?;
 
-                let (just_loaded, class) = match classloader.get_class(&method_ref.class_name) {
+                let (just_loaded, class) = match classloader.get_class(method_ref.class_name) {
                     None => {
                         drop(classloader);
                         self.classloader
                             .write()?
-                            .load_and_link_class(&method_ref.class_name)?
+                            .load_and_link_class(method_ref.class_name)?
                     }
                     Some(c) => {
                         drop(classloader);
@@ -1531,19 +1534,15 @@ impl RuntimeThread {
                             let string_ref = operand.into_class_reference().unwrap();
                             let string_obj = self.heap.objects.get(string_ref).unwrap();
 
-                            let string_class = self
-                                .classloader
-                                .write()?
-                                .load_and_link_class("java/lang/String")?
-                                .1;
 
                             if string_obj.class.this_class == "java/lang/String" {
                                 let jstring: JString = string_obj.as_jstring().unwrap();
                                 let string: String = jstring.into();
 
                                 println!("{}", string);
+                                // Option::None
                             } else {
-                                Result::Err(JvmError::InvalidObjectReference)? //Shouldn't happen
+                                return Result::Err(JvmError::InvalidObjectReference) //Shouldn't happen
                             }
 
                             Option::None
@@ -2110,7 +2109,7 @@ pub mod bytecode {
                         0xab => Self::Lookupswitch(cursor.read_i32::<BigEndian>()?, {
                             let pad = (4 - (pos + cursor.position() % 4)) % 4;
 
-                            cursor.seek(SeekFrom::Current(pad as i64));
+                            cursor.seek(SeekFrom::Current(pad as i64)).unwrap();
 
                             let _default = cursor.read_i32::<BigEndian>()?;
                             let npairs = cursor.read_i32::<BigEndian>()?;

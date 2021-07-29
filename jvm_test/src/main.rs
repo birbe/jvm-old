@@ -1,10 +1,4 @@
-use jvm;
-
-use std::env::current_dir;
-
 use jvm::vm::vm::VirtualMachine;
-use std::path::PathBuf;
-use std::time::SystemTime;
 
 use clap::{App, Arg};
 use jvm::vm::class::constant::Constant;
@@ -229,7 +223,7 @@ fn run_vm() {
         }
     });
 
-    let vm2 = vm.clone();
+    let vm2 = vm;
 
     let handle2 = thread::spawn(move || {
         let jvm = vm2.read().unwrap();

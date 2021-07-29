@@ -95,32 +95,37 @@ impl ClassBuilder {
         let super_class_constant = match &self.super_class {
             None => 0,
             Some(super_class) => {
-                let super_class_utf8 = self.add_constant(Constant::Utf8(super_class.clone()));
+                let super_class_string = super_class.clone();
+                let super_class_utf8 = self.add_constant(Constant::Utf8(super_class_string));
                 self.add_constant(Constant::Class(super_class_utf8))
             }
         };
 
         let mut cursor: Cursor<Vec<u8>> = Cursor::new(Vec::new());
 
-        cursor.write_u32::<BigEndian>(0xCAFEBABE); //Magic
+        cursor.write_u32::<BigEndian>(0xCAFEBABE).unwrap(); //Magic
 
-        cursor.write_u16::<BigEndian>(70); //Minor
-        cursor.write_u16::<BigEndian>(51); //Major
+        cursor.write_u16::<BigEndian>(70).unwrap(); //Minor
+        cursor.write_u16::<BigEndian>(51).unwrap(); //Major
 
-        cursor.write_u16::<BigEndian>(self.constants.len() as u16 + 1);
+        cursor
+            .write_u16::<BigEndian>(self.constants.len() as u16 + 1)
+            .unwrap();
 
         self.constants.iter().for_each(|constant| {
-            cursor.write(&constant.to_bytes());
+            cursor.write_all(&constant.to_bytes()).unwrap();
         });
 
-        cursor.write_u16::<BigEndian>(self.access_flags);
+        cursor.write_u16::<BigEndian>(self.access_flags).unwrap();
 
-        cursor.write_u16::<BigEndian>(this_class_constant);
-        cursor.write_u16::<BigEndian>(super_class_constant);
+        cursor.write_u16::<BigEndian>(this_class_constant).unwrap();
+        cursor.write_u16::<BigEndian>(super_class_constant).unwrap();
 
-        cursor.write_u16::<BigEndian>(0); //TODO: implement interfaces
+        cursor.write_u16::<BigEndian>(0).unwrap(); //TODO: implement interfaces
 
-        cursor.write_u16::<BigEndian>(self.field_map.len() as u16);
+        cursor
+            .write_u16::<BigEndian>(self.field_map.len() as u16)
+            .unwrap();
 
         cursor.into_inner()
     }
@@ -267,6 +272,12 @@ impl ConstantPool {
             }
             _ => return Option::None,
         })
+    }
+}
+
+impl Default for ConstantPool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -433,18 +444,10 @@ impl FieldDescriptor {
                 JavaType::Short => operand == OperandType::Int,
             },
             FieldDescriptor::ObjectType(_) => {
-                if operand == OperandType::ClassReference {
-                    true
-                } else {
-                    false
-                }
+                operand == OperandType::ClassReference
             }
             FieldDescriptor::ArrayType(_) => {
-                if operand == OperandType::ArrayReference {
-                    true
-                } else {
-                    false
-                }
+                operand == OperandType::ArrayReference
             }
         }
     }
@@ -490,7 +493,7 @@ pub struct MethodDescriptor {
 impl MethodDescriptor {
     pub fn parse(input: &str) -> Result<MethodDescriptor, ParseError> {
         let mut parameters: Vec<FieldDescriptor> = Vec::new();
-        let params_end = input.find(")").ok_or(ParseError::MalformedDescriptor)?;
+        let params_end = input.find(')').ok_or(ParseError::MalformedDescriptor)?;
 
         let mut pos: usize = 1;
 
@@ -503,7 +506,7 @@ impl MethodDescriptor {
                 parameters.push(FieldDescriptor::parse(&input[pos..pos + 1])?);
                 pos += 1;
             } else {
-                let semicolon = (&input[pos..]).find(";");
+                let semicolon = (&input[pos..]).find(';');
 
                 let desc_end = match semicolon {
                     None => params_end,
@@ -537,7 +540,7 @@ impl From<&MethodDescriptor> for String {
             "({}){}",
             md.parameters
                 .iter()
-                .map(|param| String::from(param))
+                .map(String::from)
                 .collect::<String>(),
             String::from(&md.return_type)
         )
@@ -586,7 +589,7 @@ impl JavaType {
         }) as usize
     }
 }
-
+// TODO: make this From
 impl Into<String> for &JavaType {
     fn into(self) -> String {
         match self {
@@ -650,7 +653,7 @@ impl Method {
                 let mut attr_map: HashMap<String, Attribute> = HashMap::new();
 
                 for _ in 0..attr_count {
-                    let attr = Attribute::from_bytes(rdr, &constant_pool)?;
+                    let attr = Attribute::from_bytes(rdr, constant_pool)?;
                     attr_map.insert(String::from(&attr.attribute_name), attr);
                 }
 
@@ -686,7 +689,7 @@ impl FieldInfo {
                 .get(rdr.read_u16::<BigEndian>()? as usize)
                 .ok_or(ParseError::ClassError(ClassError::ConstantNotFound))?
             {
-                Constant::Utf8(string) => FieldDescriptor::parse(&string)?,
+                Constant::Utf8(string) => FieldDescriptor::parse(string)?,
                 _ => panic!("Descriptor must be UTF8!"),
             },
             attribute_map: {
@@ -803,7 +806,7 @@ pub mod attribute {
                         }
                     }),
                     _ => {
-                        rdr.seek(SeekFrom::Current(length as i64));
+                        rdr.seek(SeekFrom::Current(length as i64)).unwrap();
                         AttributeItem::Unimplemented
                     }
                 },
@@ -1159,13 +1162,13 @@ pub mod constant {
 
         pub fn to_bytes(&self) -> Vec<u8> {
             let mut vec: Vec<u8> = match self {
-                Constant::Utf8(string) => string.as_bytes().iter().cloned().collect(),
-                Constant::Integer(integer) => integer.to_be_bytes().iter().cloned().collect(),
-                Constant::Float(float) => float.to_be_bytes().iter().cloned().collect(),
-                Constant::Long(long) => long.to_be_bytes().iter().cloned().collect(),
-                Constant::Double(double) => double.to_be_bytes().iter().cloned().collect(),
-                Constant::Class(index) => index.to_be_bytes().iter().cloned().collect(),
-                Constant::String(index) => index.to_be_bytes().iter().cloned().collect(),
+                Constant::Utf8(string) => string.as_bytes().to_vec(),
+                Constant::Integer(integer) => integer.to_be_bytes().to_vec(),
+                Constant::Float(float) => float.to_be_bytes().to_vec(),
+                Constant::Long(long) => long.to_be_bytes().to_vec(),
+                Constant::Double(double) => double.to_be_bytes().to_vec(),
+                Constant::Class(index) => index.to_be_bytes().to_vec(),
+                Constant::String(index) => index.to_be_bytes().to_vec(),
                 Constant::FieldRef(index1, index2) => [index1.to_be_bytes(), index2.to_be_bytes()]
                     .iter()
                     .flatten()
@@ -1195,10 +1198,8 @@ pub mod constant {
                     *index2.to_be_bytes().get(0).unwrap(),
                     *index2.to_be_bytes().get(1).unwrap(),
                 ]
-                .iter()
-                .cloned()
-                .collect::<Vec<u8>>(),
-                Constant::MethodType(index) => index.to_be_bytes().iter().cloned().collect(),
+                .to_vec(),
+                Constant::MethodType(index) => index.to_be_bytes().to_vec(),
                 Constant::InvokeDynamic(index1, index2) => {
                     [index1.to_be_bytes(), index2.to_be_bytes()]
                         .iter()

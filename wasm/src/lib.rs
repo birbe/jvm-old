@@ -1,7 +1,6 @@
 mod control_graph;
 mod ir;
 
-use jvm;
 use jvm::vm::class::{Class, FieldDescriptor, JavaType, Method};
 
 use byteorder::{ByteOrder, LittleEndian};
@@ -174,11 +173,8 @@ impl MemoryLayout {
 
         let resource: &mut Resource = self.resources.get_mut(self.heap_size as usize).unwrap();
 
-        match &mut resource.res_type {
-            ResourceType::U32(size) => {
-                *size += resource_size;
-            }
-            _ => {}
+        if let ResourceType::U32(size) = &mut resource.res_type {
+            *size += resource_size;
         }
 
         self.resources.len() - 1
@@ -203,13 +199,10 @@ impl MemoryLayout {
 
     pub fn as_vec(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.resources.last().unwrap().offset as usize);
-
         let mut last_index = 0;
 
         for res in self.resources.iter() {
-            for _ in last_index..res.offset {
-                out.push(0u8); //pad
-            }
+            out.resize(out.len() + (last_index..res.offset).len(), 0u8);
 
             out.append(&mut res.res_type.as_vec());
             last_index = res.offset + res.res_type.size_of();
@@ -235,9 +228,7 @@ impl<'locals> StackHelper<'locals> {
     }
 
     pub fn get(&mut self, t: ValType, offset: usize) -> LocalId {
-        if !self.vars.contains_key(&t) {
-            self.vars.insert(t, Vec::new());
-        }
+        self.vars.entry(t).or_insert_with(Vec::new);
 
         let vec = self.vars.get_mut(&t).unwrap();
 
@@ -251,7 +242,7 @@ impl<'locals> StackHelper<'locals> {
             }
         }
 
-        vec.get(offset).unwrap().clone()
+        *vec.get(offset).unwrap()
     }
 }
 
