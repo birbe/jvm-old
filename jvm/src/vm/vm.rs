@@ -67,7 +67,7 @@ impl VirtualMachine {
 
         let string_arr_ptr = self.heap.allocate_array(
             InternArrayType::ClassReference,
-            args.len().try_into().unwrap(),
+            (args.len() * std::mem::size_of::<usize>()).try_into().unwrap() ,
         );
 
         let (header, body) = unsafe { Heap::get_array::<usize>(string_arr_ptr as *mut u8) };
