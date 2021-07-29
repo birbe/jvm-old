@@ -1,4 +1,4 @@
-name: Rust
+name: check
 
 on:
   push:
@@ -10,13 +10,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  check:
+    name: Rust project
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v2
-    - name: Build
-      run: cargo +nightly build --verbose
-    - name: Run tests
-      run: cargo +nightly test --verbose
+      - uses: actions/checkout@v2
+      - name: Install latest nightly
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+
+      - name: Run cargo check
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
