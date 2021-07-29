@@ -24,6 +24,7 @@ Currently, none of the code is type-checked, so only input Java that you trust.
 - [x] Get basic bytecode running
 - [x] Get heap allocation and object creation working
 - [ ] Improve stability
+- [ ] Monitors and error handling
 - [ ] Fully implement all bytecode
 - [ ] Get the OpenJDK 7 source to load and run.
 - [ ] Stop-the-world GC
