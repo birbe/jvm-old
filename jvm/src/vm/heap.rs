@@ -3,6 +3,7 @@ use crate::vm::vm::{JvmError, Operand, OperandType};
 use core::mem;
 use std::alloc::Layout;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::mem::size_of;
 use std::ptr;
 
@@ -33,7 +34,7 @@ impl Heap {
     pub fn new(size: usize) -> Self {
         Self {
             strings: RwLock::new(HashMap::new()),
-            raw: unsafe { Self::allocate_heap(size) },
+            raw: Self::allocate_heap(size),
             objects: Slab::new(),
             static_field_map: UnsafeCell::new(HashMap::new()),
         }
@@ -49,7 +50,7 @@ impl Heap {
         let id = self.create_object(str_class.clone())?;
         let chars_ptr = self.allocate_chars(string);
 
-        self.put_field::<usize>(id, str_class.clone(), "chars", chars_ptr as usize);
+        self.put_field::<usize>(id, str_class, "chars", chars_ptr as usize);
 
         strings.insert(String::from(string), id);
 
@@ -69,12 +70,11 @@ impl Heap {
     }
 
     pub fn allocate(&self, size: usize) -> *mut u8 {
-        let ptr = unsafe {
+        unsafe {
             self.raw
                 .ptr
-                .offset(self.raw.used.fetch_add(size, Ordering::AcqRel) as isize)
-        }; //TODO: bounds check
-        ptr
+                .offset(self.raw.used.fetch_add(size, Ordering::AcqRel).try_into().unwrap())
+        }
     }
 
     pub fn allocate_class(&self, class: Arc<Class>) -> *mut u8 {
@@ -88,7 +88,7 @@ impl Heap {
     pub fn create_object(&self, class: Arc<Class>) -> Result<usize, JvmError> {
         let object = Object {
             ptr: self.allocate_class(class.clone()),
-            class: class.clone(),
+            class
         };
 
         self.objects.insert(object).ok_or(JvmError::HeapFull)
@@ -114,11 +114,14 @@ impl Heap {
         }
     }
 
-    pub fn allocate_array(&self, intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
+    pub fn allocate_array(&self, intern_type: InternArrayType, length: u32) -> *mut ArrayHeader {
         let id = InternArrayType::convert_to_u8(intern_type);
 
         let header = Layout::new::<ArrayHeader>().align_to(4).unwrap();
-        let body = Layout::array::<u8>(length).unwrap().align_to(4).unwrap();
+        let body = Layout::array::<u8>(length as usize)
+            .unwrap()
+            .align_to(4)
+            .unwrap();
 
         let (layout, offset) = header.extend(body).unwrap();
 
@@ -139,14 +142,15 @@ impl Heap {
 
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
-            (*header).size = length as u32;
-            (*header).body = ptr.offset(offset as isize);
+            (*header).size = length;
+            (*header).body = ptr.offset(offset.try_into().unwrap());
 
             ptr.cast::<ArrayHeader>()
         }
     }
-
-    pub fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {
+    /// # Safety
+    /// ptr must be a *mut ArrayHeader with all the field filled out accurately.
+    pub unsafe fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {
         let header_ptr = ptr.cast::<ArrayHeader>();
         // let body_ptr = header_ptr.offset(size_of::<ArrayHeader<T>>() as isize).cast::<T>();
         let body_ptr = unsafe { (*header_ptr).body.cast::<T>() };
@@ -155,19 +159,12 @@ impl Heap {
     }
 
     pub fn allocate_chars(&self, string: &str) -> *mut ArrayHeader {
+        let char_vec: Vec<u16> = string.encode_utf16().collect();
+        let header = self.allocate_array(InternArrayType::Char, (char_vec.len() * std::mem::size_of::<u16>()).try_into().unwrap());
         unsafe {
-            let char_vec: Vec<u16> = string.encode_utf16().collect();
-            let header = self.allocate_array(InternArrayType::Char, char_vec.len());
-
             let (arr_header, arr_body) = Self::get_array::<u16>(header as *mut u8);
-
-            assert_eq!(char_vec.len() as u32, (*arr_header).size);
-
-            ptr::copy(
-                char_vec.as_ptr(),
-                arr_body,
-                char_vec.len(),
-            );
+            assert_eq!((char_vec.len() * size_of::<u16>()) as u32, (*arr_header).size);
+            ptr::copy(char_vec.as_ptr(), arr_body, char_vec.len());
 
             arr_header
         }
@@ -181,30 +178,30 @@ impl Heap {
         value: T,
     ) {
         let key = &(String::from(class), String::from(field_name));
-
-        let ptr = if !(*self.static_field_map.get()).contains_key(key) {
-            let size = match field_descriptor {
-                FieldDescriptor::JavaType(bt) => bt.size_of(),
-                _ => size_of::<usize>(),
-            };
-
-            let ptr = self.allocate(size);
-            (*self.static_field_map.get())
-                .insert((String::from(class), String::from(field_name)), ptr);
-            ptr
-        } else {
-            *(*self.static_field_map.get()).get(key).unwrap()
-        } as *mut T;
-
         unsafe {
+            let ptr = if !(*self.static_field_map.get()).contains_key(key) {
+                let size = match field_descriptor {
+                    FieldDescriptor::JavaType(bt) => bt.size_of(),
+                    _ => size_of::<usize>(),
+                };
+
+                let ptr = self.allocate(size);
+                (*self.static_field_map.get())
+                    .insert((String::from(class), String::from(field_name)), ptr);
+                ptr
+            } else {
+                *(*self.static_field_map.get()).get(key).unwrap()
+            } as *mut T;
+
             *ptr = value;
         }
     }
-
     pub unsafe fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
-        (*self.static_field_map.get())
-            .get(&(String::from(class), String::from(field_name)))
-            .map(|&ptr| unsafe { *(ptr as *mut T) })
+        unsafe {
+            (*self.static_field_map.get())
+                .get(&(String::from(class), String::from(field_name)))
+                .map(|&ptr| *(ptr as *mut T))
+        }
     }
 }
 
@@ -225,11 +222,12 @@ pub enum InternArrayType {
     UnknownReference,
 }
 
+#[derive(Debug)]
 #[repr(C)]
 pub struct ArrayHeader {
     pub id: u8,
     pub size: u32,
-    pub body: *mut u8
+    pub body: *mut u8,
 }
 
 impl InternArrayType {
@@ -309,67 +307,66 @@ pub enum Value {
 }
 
 impl Value {
-
     pub fn as_byte(&self) -> Option<i8> {
         match &self {
             Self::Byte(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_char(&self) -> Option<u16> {
         match &self {
             Self::Char(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_double(&self) -> Option<f64> {
         match &self {
             Self::Double(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_float(&self) -> Option<f32> {
         match &self {
             Self::Float(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_int(&self) -> Option<i32> {
         match &self {
             Self::Int(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_long(&self) -> Option<i64> {
         match &self {
             Self::Long(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_reference(&self) -> Option<usize> {
         match &self {
             Self::Reference(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_bool(&self) -> Option<bool> {
         match &self {
             Self::Bool(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 
     pub fn as_short(&self) -> Option<i16> {
         match &self {
             Self::Short(v) => Option::Some(*v),
-            _ => Option::None
+            _ => Option::None,
         }
     }
 }
@@ -378,11 +375,10 @@ impl Value {
 #[derive(Clone)]
 pub struct Object {
     pub class: Arc<Class>,
-    pub ptr: *mut u8
+    pub ptr: *mut u8,
 }
 
 impl Object {
-
     pub fn get_field(&self, field_name: &str) -> Option<Value> {
         let field_offset = self.class.get_field(field_name).ok()?;
         let field_ptr = unsafe { self.ptr.offset(field_offset.offset) };
@@ -398,9 +394,9 @@ impl Object {
                     JavaType::Reference => Value::Reference(*(field_ptr as *mut usize)),
                     JavaType::Bool => Value::Bool(*(field_ptr as *mut bool)),
                     JavaType::Short => Value::Short(*(field_ptr as *mut i16)),
-                }
+                },
                 FieldDescriptor::ObjectType(_) => Value::Reference(*(field_ptr as *mut usize)),
-                FieldDescriptor::ArrayType(_) => Value::Reference(*(field_ptr as *mut usize))
+                FieldDescriptor::ArrayType(_) => Value::Reference(*(field_ptr as *mut usize)),
             })
         }
     }
@@ -408,28 +404,28 @@ impl Object {
     pub fn as_jstring(&self) -> Option<JString> {
         if self.class.this_class == "java/lang/String" {
             Option::Some(JString {
-                internal: self.clone()
+                internal: self.clone(),
             })
         } else {
             Option::None
         }
     }
-
 }
 
 pub struct JString {
-    internal: Object
+    internal: Object,
 }
 
 impl Into<String> for JString {
     fn into(self) -> String {
-        let array_pointer = self.internal.
-            get_field("chars")
+        let array_pointer = self
+            .internal
+            .get_field("chars")
             .unwrap()
             .as_reference()
             .unwrap() as *mut u8;
 
-        let (header, content) = Heap::get_array::<u16>(array_pointer);
+        let (header, content) = unsafe { Heap::get_array::<u16>(array_pointer) };
         let slice = unsafe { std::slice::from_raw_parts(content, (*header).size as usize) };
         String::from_utf16_lossy(slice)
     }

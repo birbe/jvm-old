@@ -2,7 +2,7 @@ mod control_graph;
 mod ir;
 
 use jvm;
-use jvm::vm::class::{JavaType, Class, FieldDescriptor, Method};
+use jvm::vm::class::{Class, FieldDescriptor, JavaType, Method};
 
 use byteorder::{ByteOrder, LittleEndian};
 use std::collections::HashMap;
