@@ -23,7 +23,7 @@ public class Main {
 //    public static native void print_long(long l);
 
     public static void main(String[] strings) {
-        print_string("Hello world!");
+        print_string("Test");
     }
 
     public static void main1(String[] str) {

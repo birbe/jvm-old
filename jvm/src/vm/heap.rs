@@ -57,7 +57,7 @@ impl Heap {
     }
 
     pub fn allocate_heap(size: usize) -> RawHeap {
-        let layout = Layout::from_size_align(size, 2).unwrap();
+        let layout = Layout::from_size_align(size, 4).unwrap();
         let ptr = unsafe { alloc(layout) };
 
         RawHeap {
@@ -117,19 +117,21 @@ impl Heap {
     pub fn allocate_array(&self, intern_type: InternArrayType, length: usize) -> *mut ArrayHeader {
         let id = InternArrayType::convert_to_u8(intern_type);
 
-        let header = Layout::new::<ArrayHeader>();
-        let body = Layout::array::<u8>(length).unwrap();
+        let header = Layout::new::<ArrayHeader>().align_to(4).unwrap();
+        let body = Layout::array::<u8>(length).unwrap().align_to(4).unwrap();
 
         let (layout, offset) = header.extend(body).unwrap();
 
-        assert_eq!(offset, mem::size_of::<ArrayHeader>());
-        assert!(length < u16::MAX as usize);
+        // assert_eq!(offset, mem::size_of::<ArrayHeader>());
+        // assert!(length < u16::MAX as usize);
 
         unsafe {
-            let ptr = self
-                .raw
-                .ptr
-                .offset(self.raw.used.fetch_add(layout.size(), Ordering::Relaxed) as isize);
+            // let ptr = self
+            //     .raw
+            //     .ptr
+            //     .offset(self.raw.used.fetch_add(layout.size(), Ordering::Relaxed) as isize);
+
+            let ptr = alloc(layout);
 
             if ptr.is_null() {
                 std::alloc::handle_alloc_error(layout);
@@ -138,6 +140,7 @@ impl Heap {
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
             (*header).size = length as u32;
+            (*header).body = ptr.offset(offset as isize);
 
             ptr.cast::<ArrayHeader>()
         }
@@ -146,18 +149,19 @@ impl Heap {
     pub fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {
         let header_ptr = ptr.cast::<ArrayHeader>();
         // let body_ptr = header_ptr.offset(size_of::<ArrayHeader<T>>() as isize).cast::<T>();
-        let body_ptr = unsafe { header_ptr.offset(1).cast::<T>() };
+        let body_ptr = unsafe { (*header_ptr).body.cast::<T>() };
 
         (header_ptr, body_ptr)
     }
 
     pub fn allocate_chars(&self, string: &str) -> *mut ArrayHeader {
         unsafe {
-            let header = self.allocate_array(InternArrayType::Char, string.len());
+            let char_vec: Vec<u16> = string.encode_utf16().collect();
+            let header = self.allocate_array(InternArrayType::Char, char_vec.len());
 
             let (arr_header, arr_body) = Self::get_array::<u16>(header as *mut u8);
 
-            let char_vec: Vec<u16> = string.encode_utf16().collect();
+            assert_eq!(char_vec.len() as u32, (*arr_header).size);
 
             ptr::copy(
                 char_vec.as_ptr(),
@@ -225,6 +229,7 @@ pub enum InternArrayType {
 pub struct ArrayHeader {
     pub id: u8,
     pub size: u32,
+    pub body: *mut u8
 }
 
 impl InternArrayType {

@@ -26,7 +26,6 @@ use std::iter::FromIterator;
 static mut BENCHMARKS: u16 = 0;
 
 pub struct VirtualMachine {
-    pub start_time: SystemTime,
     pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,
     pub class_loader: Arc<RwLock<ClassLoader>>,
     pub heap: Arc<Heap>
@@ -36,7 +35,6 @@ impl VirtualMachine {
     pub fn new(class_provider: Box<dyn ClassProvider>) -> VirtualMachine {
         VirtualMachine {
             threads: HashMap::new(),
-            start_time: SystemTime::now(),
 
             class_loader: Arc::new(RwLock::new(ClassLoader::new(class_provider))),
             heap: Arc::new(Heap::new(1024 * 1024)),

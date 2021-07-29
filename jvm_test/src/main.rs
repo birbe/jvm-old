@@ -15,8 +15,6 @@ use jvm::vm::linker::loader::ClassProvider;
 use std::thread;
 
 fn main() {
-    let dir = current_dir().unwrap();
-
     let app = App::new("Rust JVM Test")
         .version("0.1")
         .about("Tests the JVM in either WASM-compilation mode or interpreted mode")
@@ -224,8 +222,6 @@ fn run_vm() {
             vec![String::from("Hello world!")],
         )
         .unwrap();
-
-        vm.start_time = SystemTime::now();
 
         // let mut step_start = SystemTime::now();
     }
