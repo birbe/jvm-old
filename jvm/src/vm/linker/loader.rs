@@ -2,7 +2,7 @@ use crate::vm::class::attribute::Attribute;
 use crate::vm::class::constant::Constant;
 use crate::vm::class::FieldDescriptor;
 use crate::vm::class::{
-    JavaType, Class, ConstantPool, FieldInfo, Method, MethodDescriptor, MethodReturnType,
+    Class, ConstantPool, FieldInfo, JavaType, Method, MethodDescriptor, MethodReturnType,
     ObjectField,
 };
 use byteorder::{BigEndian, ReadBytesExt};
@@ -13,14 +13,12 @@ use std::iter::FromIterator;
 use std::ops::Deref;
 
 use crate::vm::vm::JvmError;
+use std::io;
 use std::mem::size_of;
 use std::sync::Arc;
-use std::io;
 
 pub trait ClassProvider: Send + Sync {
-
     fn get_classfile(&self, classpath: &str) -> Option<&[u8]>;
-
 }
 
 #[derive(Debug)]
@@ -29,7 +27,7 @@ pub enum ClassLoadState {
     Loading,
     Loaded(Arc<Class>),
     DeserializationError(DeserializationError),
-    NotFound
+    NotFound,
 }
 
 impl ClassLoadState {
@@ -41,7 +39,7 @@ impl ClassLoadState {
             ClassLoadState::DeserializationError(_) => {
                 panic!("Cannot unwrap a class that failed to load.")
             }
-            ClassLoadState::NotFound => panic!("Could not find the requested classfile.")
+            ClassLoadState::NotFound => panic!("Could not find the requested classfile."),
         }
     }
 }
@@ -55,14 +53,14 @@ impl From<DeserializationError> for ClassLoadState {
 pub struct ClassLoader {
     pub class_map: HashMap<String, ClassLoadState>,
 
-    class_provider: Box<dyn ClassProvider>
+    class_provider: Box<dyn ClassProvider>,
 }
 
 impl ClassLoader {
     pub fn new(class_provider: Box<dyn ClassProvider>) -> Self {
         Self {
             class_map: HashMap::new(),
-            class_provider
+            class_provider,
         }
     }
 
@@ -77,8 +75,8 @@ impl ClassLoader {
             None => false,
             Some(loadstate) => match loadstate {
                 ClassLoadState::Loaded(_) => true,
-                _ => false
-            }
+                _ => false,
+            },
         }
     }
 
@@ -104,20 +102,27 @@ impl ClassLoader {
             Some(_) => {
                 match class_load_state.unwrap() {
                     ClassLoadState::NotLoaded => {}
-                    ClassLoadState::Loading => return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading)),
-                    ClassLoadState::Loaded(_) => return Result::Ok((false, class_load_state.unwrap().unwrap())),
+                    ClassLoadState::Loading => {
+                        return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading))
+                    }
+                    ClassLoadState::Loaded(_) => {
+                        return Result::Ok((false, class_load_state.unwrap().unwrap()))
+                    }
                     ClassLoadState::DeserializationError(e) => {
                         return Result::Err(JvmError::ClassLoadError(
                             ClassLoadState::DeserializationError(e.clone()),
                         ))
-                    },
-                    ClassLoadState::NotFound => return Result::Err(JvmError::ClassLoadError(ClassLoadState::NotFound))
+                    }
+                    ClassLoadState::NotFound => {
+                        return Result::Err(JvmError::ClassLoadError(ClassLoadState::NotFound))
+                    }
                 };
             }
             None => {}
         };
 
-        let bytes = self.class_provider
+        let bytes = self
+            .class_provider
             .get_classfile(classpath)
             .ok_or(JvmError::ClassLoadError(ClassLoadState::NotFound))?;
 
