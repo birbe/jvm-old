@@ -16,25 +16,23 @@ use std::sync::{Arc, RwLock};
 
 pub struct Heap {
     pub strings: RwLock<HashMap<String, usize>>,
-    pub raw: RawHeap,
     pub objects: Slab<Object>,
 
     //TODO: this is not okay!
     pub static_field_map: UnsafeCell<HashMap<(String, String), *mut u8>>, //TODO: &(String, String) for lookups sucks
 }
 
-pub struct RawHeap {
-    pub size: usize,
-    pub ptr: *mut u8,
-    pub used: AtomicUsize,
-    pub layout: Layout,
-}
+// pub struct RawHeap {
+//     pub size: usize,
+//     pub ptr: *mut u8,
+//     pub used: AtomicUsize,
+//     pub layout: Layout,
+// }
 
 impl Heap {
     pub fn new(size: usize) -> Self {
         Self {
             strings: RwLock::new(HashMap::new()),
-            raw: Self::allocate_heap(size),
             objects: Slab::new(),
             static_field_map: UnsafeCell::new(HashMap::new()),
         }
@@ -57,27 +55,10 @@ impl Heap {
         Result::Ok(id)
     }
 
-    pub fn allocate_heap(size: usize) -> RawHeap {
-        let layout = Layout::from_size_align(size, 4).unwrap();
-        let ptr = unsafe { alloc(layout) };
-
-        RawHeap {
-            size,
-            ptr,
-            used: AtomicUsize::new(0),
-            layout,
-        }
-    }
 
     pub fn allocate(&self, size: usize) -> *mut u8 {
         unsafe {
-            self.raw.ptr.offset(
-                self.raw
-                    .used
-                    .fetch_add(size, Ordering::AcqRel)
-                    .try_into()
-                    .unwrap(),
-            )
+            alloc(Layout::from_size_align(size, std::mem::align_of::<usize>() * 2).unwrap())
         }
     }
 
@@ -176,6 +157,8 @@ impl Heap {
         }
     }
 
+    /// # Safety
+    /// Must not be threaded probably
     pub unsafe fn put_static<T: Debug>(
         &self,
         class: &str,
@@ -202,6 +185,8 @@ impl Heap {
             *ptr = value;
         }
     }
+    /// # Safety
+    /// Nothing can be writing
     pub unsafe fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
         unsafe {
             (*self.static_field_map.get())
@@ -421,7 +406,7 @@ impl Object {
 pub struct JString {
     internal: Object,
 }
-
+// TODO: Make this from
 impl Into<String> for JString {
     fn into(self) -> String {
         let array_pointer = self

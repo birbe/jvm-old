@@ -71,54 +71,42 @@ impl ClassLoader {
     pub fn is_class_linked(&self, classpath: &str) -> bool {
         let class = self.class_map.get(classpath);
 
-        match class {
-            None => false,
-            Some(loadstate) => match loadstate {
-                ClassLoadState::Loaded(_) => true,
-                _ => false,
-            },
-        }
+        matches!(class, Some(ClassLoadState::Loaded(_)))
     }
 
     fn load_link_field_descriptor(&mut self, fd: &FieldDescriptor) {
         match fd {
             FieldDescriptor::JavaType(_) => {}
             FieldDescriptor::ObjectType(obj_classpath) => {
-                self.load_and_link_class(&obj_classpath);
+                self.load_and_link_class(obj_classpath).unwrap();
             }
-            FieldDescriptor::ArrayType(at) => match &*at.field_descriptor {
-                FieldDescriptor::ObjectType(obj_classpath) => {
-                    self.load_and_link_class(&obj_classpath);
+            FieldDescriptor::ArrayType(at) => {
+                if let FieldDescriptor::ObjectType(obj_classpath) = &*at.field_descriptor {
+                    self.load_and_link_class(obj_classpath).unwrap();
                 }
-                _ => {}
-            },
+            }
         }
     }
 
     pub fn load_and_link_class(&mut self, classpath: &str) -> Result<(bool, Arc<Class>), JvmError> {
         let class_load_state = self.class_map.get(classpath);
 
-        match class_load_state {
-            Some(_) => {
-                match class_load_state.unwrap() {
-                    ClassLoadState::NotLoaded => {}
-                    ClassLoadState::Loading => {
-                        return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading))
-                    }
-                    ClassLoadState::Loaded(_) => {
-                        return Result::Ok((false, class_load_state.unwrap().unwrap()))
-                    }
-                    ClassLoadState::DeserializationError(e) => {
-                        return Result::Err(JvmError::ClassLoadError(
-                            ClassLoadState::DeserializationError(e.clone()),
-                        ))
-                    }
-                    ClassLoadState::NotFound => {
-                        return Result::Err(JvmError::ClassLoadError(ClassLoadState::NotFound))
-                    }
-                };
-            }
-            None => {}
+        if let Some(class_load_state) = class_load_state {
+            match class_load_state {
+                ClassLoadState::NotLoaded => {}
+                ClassLoadState::Loading => {
+                    return Result::Err(JvmError::ClassLoadError(ClassLoadState::Loading))
+                }
+                ClassLoadState::Loaded(_) => return Result::Ok((false, class_load_state.unwrap())),
+                ClassLoadState::DeserializationError(e) => {
+                    return Result::Err(JvmError::ClassLoadError(
+                        ClassLoadState::DeserializationError(e.clone()),
+                    ))
+                }
+                ClassLoadState::NotFound => {
+                    return Result::Err(JvmError::ClassLoadError(ClassLoadState::NotFound))
+                }
+            };
         };
 
         let bytes = self
@@ -132,13 +120,11 @@ impl ClassLoader {
 
         let mut class = load_class(bytes)?;
 
-        if !self.is_class_linked(&class.super_class) {
-            if class.super_class != "" {
-                self.load_and_link_class(&*String::from(&class.super_class));
-            }
+        if !self.is_class_linked(&class.super_class) && !class.super_class.is_empty() {
+            self.load_and_link_class(&class.super_class).unwrap();
         }
 
-        if class.super_class != "" {
+        if !class.super_class.is_empty() {
             // println!("Getting superclass {} of {}", &class.super_class, classpath);
             let superclass = self.get_class(&class.super_class).unwrap();
             class.full_heap_size = class.heap_size + superclass.full_heap_size;
@@ -148,12 +134,13 @@ impl ClassLoader {
             match constant {
                 Constant::Class(utf8) => {
                     let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
-                    self.load_and_link_class(name);
+                    self.load_and_link_class(name).unwrap();
                 }
                 Constant::FieldRef(class_name, name_and_type) => {
                     self.load_and_link_class(
                         class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                    );
+                    )
+                    .unwrap();
 
                     let (_, descriptor) = class
                         .constant_pool
@@ -166,7 +153,8 @@ impl ClassLoader {
                 Constant::MethodRef(class_name, name_and_type) => {
                     self.load_and_link_class(
                         class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                    );
+                    )
+                    .unwrap();
 
                     let (_, descriptor) = class
                         .constant_pool
@@ -204,13 +192,13 @@ impl ClassLoader {
         for (_, info) in rc.field_map.iter() {
             match &info.info.field_descriptor {
                 FieldDescriptor::ObjectType(fd_classpath) => {
-                    self.load_and_link_class(fd_classpath);
+                    self.load_and_link_class(fd_classpath).unwrap();
                 }
                 FieldDescriptor::ArrayType(array_type) => {
                     if let FieldDescriptor::ObjectType(fd_classpath) =
                         array_type.field_descriptor.deref()
                     {
-                        self.load_and_link_class(&fd_classpath);
+                        self.load_and_link_class(fd_classpath).unwrap();
                     }
                 }
                 FieldDescriptor::JavaType(_) => {}
@@ -223,11 +211,10 @@ impl ClassLoader {
     pub fn recurse_is_superclass(&self, subclass: &Class, superclass_cpath: &str) -> bool {
         if subclass.this_class == superclass_cpath {
             false
-        } else if superclass_cpath == "java/lang/Object"
-            && subclass.this_class != "java/lang/Object"
+        } else if (superclass_cpath == "java/lang/Object"
+            && subclass.this_class != "java/lang/Object")
+            || (subclass.super_class == superclass_cpath)
         {
-            true
-        } else if subclass.super_class == superclass_cpath {
             true
         } else if subclass.super_class == "java/lang/Object"
             && superclass_cpath != "java/lang/Object"
@@ -251,26 +238,20 @@ impl ClassLoader {
             let m1 = subclass.get_method(name, descriptor).ok()?;
             let m2 = superclass.get_method(name, descriptor).ok()?;
 
-            if {
-                (m2.access_flags & 0x1 == 0x1)
-                    || (m2.access_flags & 0x4 == 0x4)
-                    || (!((m2.access_flags & 0x1 == 0x1)
-                        && (m2.access_flags & 0x2 == 0x2)
-                        && (m2.access_flags & 0x4 == 0x4))
-                        && are_classpaths_siblings(&subclass.this_class, &superclass.this_class))
-            } {
+            if (m2.access_flags & 0x1 == 0x1)
+                || (m2.access_flags & 0x4 == 0x4)
+                || are_classpaths_siblings(&subclass.this_class, &superclass.this_class)
+            {
                 return Option::Some((subclass, m1));
+            } else if !superclass.super_class.is_empty() {
+                return self.recurse_resolve_overridding_method(superclass, name, descriptor);
             } else {
-                if superclass.super_class != "" {
-                    return self.recurse_resolve_overridding_method(superclass, name, descriptor);
-                } else {
-                    //No superclass
-                    return Option::None;
-                }
+                //No superclass
+                return Option::None;
             }
         }
 
-        return Option::None;
+        Option::None
     }
 
     pub fn recurse_resolve_supermethod_special(
@@ -279,7 +260,7 @@ impl ClassLoader {
         name: &str,
         descriptor: &str,
     ) -> Option<(Arc<Class>, Arc<Method>)> {
-        if subclass.super_class == "" {
+        if subclass.super_class.is_empty() {
             return Option::None;
         }
 
@@ -297,8 +278,8 @@ impl ClassLoader {
 }
 
 pub fn are_classpaths_siblings(a: &str, b: &str) -> bool {
-    let split_a = Vec::from_iter(a.split("/").map(String::from));
-    let split_b = Vec::from_iter(b.split("/").map(String::from));
+    let split_a = Vec::from_iter(a.split('/').map(String::from));
+    let split_b = Vec::from_iter(b.split('/').map(String::from));
 
     if split_a.len() != split_b.len() {
         false
@@ -382,9 +363,15 @@ pub fn load_class(bytes: &[u8]) -> Result<Class, DeserializationError> {
 
     let super_class: String;
 
-    this_class = String::from(constant_pool.resolve_class_info(this_class_index).ok_or(
-        DeserializationError::InvalidConstant(String::from("this_class constant was not a UTF8!")),
-    )?);
+    this_class = String::from(
+        constant_pool
+            .resolve_class_info(this_class_index)
+            .ok_or_else(|| {
+                DeserializationError::InvalidConstant(String::from(
+                    "this_class constant was not a UTF8!",
+                ))
+            })?,
+    );
 
     match constant_pool.resolve_class_info(super_class_index) {
         Some(name) => {
