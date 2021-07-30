@@ -23,7 +23,15 @@ public class Main {
 
     public static void main(String[] strings) {
         print_string("i løve møøse");
-        print_int(static_thing);
+//
+        char[] chars = new char[2];
+        chars[0] = 'h';
+        chars[1] = 'i';
+        String string = new String(chars);
+
+        print_string(string);
+
+        print_string(strings[0]);
     }
 
     public static void main1(String[] str) {

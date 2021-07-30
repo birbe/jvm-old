@@ -1,6 +1,6 @@
 use crate::vm::class::{Class, FieldDescriptor, JavaType};
 use crate::vm::vm::{JvmError, Operand, OperandType};
-use std::alloc::Layout;
+use std::alloc::{Layout, dealloc};
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::mem::{align_of, size_of};
@@ -15,6 +15,7 @@ use std::sync::{Arc, RwLock};
 pub struct Heap {
     pub strings: RwLock<HashMap<String, usize>>,
     pub objects: Slab<Object>,
+    pub arrays: Slab<*mut ArrayHeader>,
 
     //TODO: this is not okay!
     pub static_field_map: UnsafeCell<HashMap<(String, String), *mut u8>>, //TODO: &(String, String) for lookups sucks
@@ -32,10 +33,13 @@ impl Heap {
         Self {
             strings: RwLock::new(HashMap::new()),
             objects: Slab::new(),
+            arrays: Slab::new(),
             static_field_map: UnsafeCell::new(HashMap::new()),
         }
     }
 
+    ///Allocates a java/lang/String object onto the heap, allocates a char[], and inserts
+    ///the char[] into the chars field of the String object, returning the object reference
     pub fn create_string(&self, string: &str, str_class: Arc<Class>) -> Result<usize, JvmError> {
         let mut strings = self.strings.write()?;
 
@@ -100,7 +104,10 @@ impl Heap {
         let header = Layout::new::<ArrayHeader>()
             .align_to(align_of::<usize>())
             .unwrap();
-        let body = Layout::array::<u8>(length as usize)
+
+        let body_size = intern_type.size_of() * length as usize;
+
+        let body = Layout::array::<u8>(body_size)
             .unwrap()
             .align_to(size_of::<usize>() * 2)
             .unwrap();
@@ -116,8 +123,11 @@ impl Heap {
 
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
-            (*header).size = length;
+            (*header).size = body_size.try_into().unwrap();
             (*header).body = ptr.offset(offset.try_into().unwrap());
+            (*header).full_size = layout.size();
+
+            self.arrays.insert(header);
 
             ptr.cast::<ArrayHeader>()
         }
@@ -137,15 +147,15 @@ impl Heap {
         let char_vec: Vec<u16> = string.encode_utf16().collect();
         let header = self.allocate_array(
             InternArrayType::Char,
-            (char_vec.len() * std::mem::size_of::<u16>())
+            char_vec.len()
                 .try_into()
                 .unwrap(),
         );
         unsafe {
             let (arr_header, arr_body) = Self::get_array::<u16>(header as *mut u8);
             assert_eq!(
-                (char_vec.len() * size_of::<u16>()) as u32,
-                (*arr_header).size
+                char_vec.len() * size_of::<u16>(),
+                (*arr_header).size as usize
             );
             ptr::copy(char_vec.as_ptr(), arr_body, char_vec.len());
 
@@ -192,9 +202,30 @@ impl Heap {
     }
 }
 
+impl Drop for Heap {
+    fn drop(&mut self) {
+
+        self.arrays.unique_iter().for_each(|&array| {
+            unsafe {
+                let layout = Layout::from_size_align((*array).full_size, align_of::<usize>()).unwrap();
+                dealloc(array as *mut u8, layout);
+            }
+        });
+
+        self.objects.unique_iter().for_each(|object| {
+            let size = object.class.full_heap_size;
+            let layout = Layout::from_size_align(size, std::mem::align_of::<usize>() * 2).unwrap();
+
+            unsafe { dealloc(object.ptr, layout); }
+        });
+
+    }
+}
+
 unsafe impl Send for Heap {}
 unsafe impl Sync for Heap {}
 
+#[derive(Copy, Clone)]
 pub enum InternArrayType {
     Char,
     Int,
@@ -215,6 +246,7 @@ pub struct ArrayHeader {
     pub id: u8,
     pub size: u32,
     pub body: *mut u8,
+    pub full_size: usize
 }
 
 impl InternArrayType {
@@ -265,13 +297,13 @@ impl InternArrayType {
         }
     }
 
-    pub fn size_of(t: InternArrayType) -> usize {
-        match t {
-            InternArrayType::Char => 16,
-            InternArrayType::Int => 32,
-            InternArrayType::Float => 32,
-            InternArrayType::Long => 64,
-            InternArrayType::Double => 64,
+    pub fn size_of(&self) -> usize {
+        match self {
+            InternArrayType::Char => size_of::<u16>(),
+            InternArrayType::Int => size_of::<i32>(),
+            InternArrayType::Float => size_of::<f32>(),
+            InternArrayType::Long => size_of::<i64>(),
+            InternArrayType::Double => size_of::<f64>(),
             InternArrayType::NullReference => size_of::<usize>(),
             InternArrayType::InterfaceReference => size_of::<usize>(),
             InternArrayType::ClassReference => size_of::<usize>(),

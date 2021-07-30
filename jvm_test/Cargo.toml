@@ -13,3 +13,6 @@ wasm = { path = "../wasm" }
 wasmtime = "0.26.0"
 clap = "2.33.3"
 byteorder = "1.4.2"
+
+tui = "0.15"
+termion = "*"

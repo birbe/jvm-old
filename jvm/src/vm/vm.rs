@@ -66,7 +66,7 @@ impl VirtualMachine {
 
         let string_arr_ptr = self.heap.allocate_array(
             InternArrayType::ClassReference,
-            (args.len() * std::mem::size_of::<usize>())
+            args.len()
                 .try_into()
                 .unwrap(),
         );
@@ -85,6 +85,8 @@ impl VirtualMachine {
                     class_loader
                         .load_and_link_class("java/lang/String")?.class
                 )?;
+
+                dbg!(allocated_string);
 
                 unsafe {
                     *body.offset(index.try_into().unwrap()) = allocated_string as usize;
@@ -864,12 +866,15 @@ impl RuntimeThread {
             //castore
             0x55 => {
                 let val = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                let index = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                let index: isize = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1.try_into().unwrap();
                 let arrayref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 unsafe {
-                    let (_, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
-                    let offset = ptr.offset(index.1.try_into().unwrap());
+                    let (header, ptr) = Heap::get_array::<u16>(arrayref.1 as *mut u8);
+                    if index >= (*header).size.try_into().unwrap() {
+                        panic!("Array access out of bounds");
+                    }
+                    let offset = ptr.offset(index);
                     *offset = val.1 as u16;
                 }
             }
