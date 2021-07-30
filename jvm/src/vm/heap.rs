@@ -53,11 +53,8 @@ impl Heap {
         Result::Ok(id)
     }
 
-
     pub fn allocate(&self, size: usize) -> *mut u8 {
-        unsafe {
-            alloc(Layout::from_size_align(size, std::mem::align_of::<usize>() * 2).unwrap())
-        }
+        unsafe { alloc(Layout::from_size_align(size, std::mem::align_of::<usize>() * 2).unwrap()) }
     }
 
     pub fn allocate_class(&self, class: Arc<Class>) -> *mut u8 {
@@ -415,7 +412,9 @@ impl Into<String> for JString {
             .unwrap() as *mut u8;
 
         let (header, content) = unsafe { Heap::get_array::<u16>(array_pointer) };
-        let slice = unsafe { std::slice::from_raw_parts(content, (*header).size as usize) };
+        let slice = unsafe {
+            std::slice::from_raw_parts(content, ((*header).size as usize) / size_of::<u16>())
+        };
         String::from_utf16_lossy(slice)
     }
 }
