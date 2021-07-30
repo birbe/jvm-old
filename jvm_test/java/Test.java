@@ -1,3 +1,3 @@
 public class Test {
-    public static int TEST_STATIC = 10;
+    public static int TEST_STATIC = 50;
 }

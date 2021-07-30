@@ -181,60 +181,60 @@ impl ClassLoader {
             }
         }
 
-        for constant in class.constant_pool.get_vec().iter() {
-            match constant {
-                Constant::Class(utf8) => {
-                    let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
-                    self.handle_class_report(name, &mut all_loaded_classes)?;
-                }
-                Constant::FieldRef(class_name, name_and_type) => {
-                    self.handle_class_report(
-                        class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                        &mut all_loaded_classes
-                    )?;
-
-                    let (_, descriptor) = class
-                        .constant_pool
-                        .resolve_name_and_type(*name_and_type)
-                        .unwrap();
-                    let fd = FieldDescriptor::parse(descriptor)?;
-
-                    self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
-                }
-                Constant::MethodRef(class_name, name_and_type) => {
-                    self.handle_class_report(
-                        class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                        &mut all_loaded_classes
-                    )?;
-
-                    let (_, descriptor) = class
-                        .constant_pool
-                        .resolve_name_and_type(*name_and_type)
-                        .unwrap();
-                    let md = MethodDescriptor::parse(descriptor)?;
-
-                    match md.return_type {
-                        MethodReturnType::Void => {}
-                        MethodReturnType::FieldDescriptor(fd) => {
-                            self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
-                        }
-                    }
-
-                    md.parameters.iter().
-                        map(|param| {
-                            self.handle_load_link_fd(param, &mut all_loaded_classes)?;
-                            Result::Ok(())
-                        })
-                        .collect::<Result<Vec<()>, JvmError>>()?;
-                }
-                Constant::InterfaceMethodRef(_, _) => {}
-                Constant::NameAndType(_, _) => {}
-                Constant::MethodHandle(_, _) => {}
-                Constant::MethodType(_) => {}
-                Constant::InvokeDynamic(_, _) => {}
-                _ => {}
-            }
-        }
+        // for constant in class.constant_pool.get_vec().iter() {
+        //     match constant {
+        //         Constant::Class(utf8) => {
+        //             let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
+        //             self.handle_class_report(name, &mut all_loaded_classes)?;
+        //         }
+        //         Constant::FieldRef(class_name, name_and_type) => {
+        //             self.handle_class_report(
+        //                 class.constant_pool.resolve_class_info(*class_name).unwrap(),
+        //                 &mut all_loaded_classes
+        //             )?;
+        //
+        //             let (_, descriptor) = class
+        //                 .constant_pool
+        //                 .resolve_name_and_type(*name_and_type)
+        //                 .unwrap();
+        //             let fd = FieldDescriptor::parse(descriptor)?;
+        //
+        //             self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
+        //         }
+        //         Constant::MethodRef(class_name, name_and_type) => {
+        //             self.handle_class_report(
+        //                 class.constant_pool.resolve_class_info(*class_name).unwrap(),
+        //                 &mut all_loaded_classes
+        //             )?;
+        //
+        //             let (_, descriptor) = class
+        //                 .constant_pool
+        //                 .resolve_name_and_type(*name_and_type)
+        //                 .unwrap();
+        //             let md = MethodDescriptor::parse(descriptor)?;
+        //
+        //             match md.return_type {
+        //                 MethodReturnType::Void => {}
+        //                 MethodReturnType::FieldDescriptor(fd) => {
+        //                     self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
+        //                 }
+        //             }
+        //
+        //             md.parameters.iter().
+        //                 map(|param| {
+        //                     self.handle_load_link_fd(param, &mut all_loaded_classes)?;
+        //                     Result::Ok(())
+        //                 })
+        //                 .collect::<Result<Vec<()>, JvmError>>()?;
+        //         }
+        //         Constant::InterfaceMethodRef(_, _) => {}
+        //         Constant::NameAndType(_, _) => {}
+        //         Constant::MethodHandle(_, _) => {}
+        //         Constant::MethodType(_) => {}
+        //         Constant::InvokeDynamic(_, _) => {}
+        //         _ => {}
+        //     }
+        // }
 
         self.class_map.insert(
             String::from(classpath),

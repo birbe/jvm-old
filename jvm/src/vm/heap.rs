@@ -122,6 +122,7 @@ impl Heap {
             ptr.cast::<ArrayHeader>()
         }
     }
+
     /// # Safety
     /// ptr must be a *mut ArrayHeader with all the field filled out accurately.
     pub unsafe fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {

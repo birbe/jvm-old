@@ -171,7 +171,7 @@ fn run_vm() {
     };
 
     insert_class!(class_provider, "Main");
-    // insert_class!(class_provider, "Test");
+    insert_class!(class_provider, "Test");
     insert_class!(class_provider, "java/lang/Object");
     insert_class!(class_provider, "java/lang/String");
 
@@ -180,11 +180,6 @@ fn run_vm() {
 
     {
         let mut vm = vm.write().unwrap();
-
-        vm.class_loader
-            .write()
-            .unwrap()
-            .load_and_link_class("Main").unwrap();
 
         vm.spawn_thread(
             "thread 1",

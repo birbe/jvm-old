@@ -22,6 +22,7 @@ use crate::vm::heap::{Heap, InternArrayType, JString, Reference, Type};
 use std::iter::FromIterator;
 use std::ops::DerefMut;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::fmt::{Debug, Formatter};
 
 pub struct VirtualMachine {
     pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,
@@ -47,7 +48,8 @@ impl VirtualMachine {
         method_descriptor: &str,
         args: Vec<String>,
     ) -> Result<Arc<RwLock<RuntimeThread>>, JvmError> {
-        let class_load_report = self.class_loader.write()?.load_and_link_class(classpath)?;
+        let mut class_loader = self.class_loader.write()?;
+        let class_load_report = class_loader.load_and_link_class(classpath)?;
 
         let mut thread = RuntimeThread::new(
             String::from(thread_name),
@@ -80,9 +82,8 @@ impl VirtualMachine {
             .map(|arg| {
                 let allocated_string = self.heap.create_string(
                     arg,
-                    self.class_loader
-                        .read()?
-                        .get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotFound))?
+                    class_loader
+                        .load_and_link_class("java/lang/String")?.class
                 )?;
 
                 unsafe {
@@ -96,6 +97,18 @@ impl VirtualMachine {
             .collect::<Result<Vec<()>, JvmError>>()?;
 
         thread.add_frame(frame);
+
+        class_load_report.all_loaded_classes.into_iter().for_each(|class| {
+            match class.get_method("<clinit>", "()V") {
+                Ok(method) => {
+                    thread.add_frame(RuntimeThread::create_frame(
+                        method,
+                        class
+                    ));
+                }
+                Err(_) => {}
+            }
+        });
 
         self.threads
             .insert(String::from(thread_name), Arc::new(RwLock::new(thread)));
@@ -287,13 +300,20 @@ impl FromIterator<(u16, Vec<Type>)> for LocalVariableMap {
     }
 }
 
-#[derive(Debug)]
 pub struct Frame {
     local_vars: LocalVariableMap,
     method_name: String,
     op_stack: Vec<Operand>,
     code: Cursor<Vec<u8>>,
     class: Arc<Class>,
+}
+
+impl Debug for Frame {
+
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Class/Method: {}/{}\nOp stack: {:?}", &self.class.this_class, &self.method_name, &self.op_stack)
+    }
+
 }
 
 #[derive(Debug)]
@@ -506,6 +526,10 @@ impl RuntimeThread {
     }
 
     pub fn step(&mut self) -> Result<(), JvmError> {
+        {
+            println!("{:?}", self.frame_stack.last().unwrap().read().unwrap());
+        }
+
         let mut frame_write = self
             .frame_stack
             .last()
@@ -977,22 +1001,12 @@ impl RuntimeThread {
 
                 let class_name = field.class_name.to_owned();
 
-                drop(field);
-
                 let class_load_report = lazy_class_resolve!(self.classloader, &class_name);
 
                 init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
-                    let field = frame
-                    .class
-                    .constant_pool
-                    .resolve_ref_info(index as usize)
-                    .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
-
                     let fd = FieldDescriptor::parse(field.descriptor)?;
 
                     let class = &class_load_report.class;
-
-                    let mut frame = self.frame_stack.last().unwrap().write().unwrap();
 
                     match &fd {
                         FieldDescriptor::JavaType(bt) => match bt {
@@ -1531,6 +1545,7 @@ impl RuntimeThread {
                                 let operand =
                                     argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                                 let string_ref = operand.into_class_reference().unwrap();
+                                dbg!(string_ref);
                                 let string_obj = self.heap.objects.get(string_ref).unwrap();
 
 
