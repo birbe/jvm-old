@@ -1,6 +1,5 @@
 use crate::vm::class::{Class, FieldDescriptor, JavaType};
 use crate::vm::vm::{JvmError, Operand, OperandType};
-use core::mem;
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -11,7 +10,6 @@ use sharded_slab::Slab;
 use std::alloc::alloc;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 pub struct Heap {

@@ -184,9 +184,7 @@ fn run_vm() {
         vm.class_loader
             .write()
             .unwrap()
-            .load_and_link_class("Main")
-            .ok()
-            .unwrap();
+            .load_and_link_class("Main").unwrap();
 
         vm.spawn_thread(
             "thread 1",

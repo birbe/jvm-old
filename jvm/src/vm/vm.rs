@@ -6,7 +6,6 @@ use crate::vm::linker::loader::{ClassLoadState, ClassLoader, ClassProvider, Dese
 use std::collections::{HashMap, HashSet};
 
 use std::convert::TryInto;
-use std::path::PathBuf;
 
 use crate::vm::class::attribute::AttributeItem;
 use crate::vm::class::JavaType;
@@ -23,8 +22,6 @@ use crate::vm::heap::{Heap, InternArrayType, JString, Reference, Type};
 use std::iter::FromIterator;
 use std::ops::DerefMut;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
-
-static mut BENCHMARKS: u16 = 0;
 
 pub struct VirtualMachine {
     pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,

@@ -80,20 +80,56 @@ impl ClassLoader {
         matches!(class, Some(ClassLoadState::Loaded(_)))
     }
 
-    fn load_link_field_descriptor(&mut self, fd: &FieldDescriptor) -> Option<ClassLoadReport> {
-        match fd {
+    fn load_link_field_descriptor(&mut self, fd: &FieldDescriptor) -> Result<Option<ClassLoadReport>, JvmError> {
+        Result::Ok(match fd {
             FieldDescriptor::JavaType(_) => Option::None,
             FieldDescriptor::ObjectType(obj_classpath) => {
-                Option::Some(self.load_and_link_class(obj_classpath).unwrap())
+                Option::Some(self.load_and_link_class(obj_classpath)?)
             }
             FieldDescriptor::ArrayType(at) => {
                 if let FieldDescriptor::ObjectType(obj_classpath) = &*at.field_descriptor {
-                    Option::Some(self.load_and_link_class(obj_classpath).unwrap())
+                    Option::Some(self.load_and_link_class(obj_classpath)?)
                 } else {
                     Option::None
                 }
             }
+        })
+    }
+
+    fn handle_load_link_fd(&mut self, fd: &FieldDescriptor, classes: &mut HashSet<Arc<Class>>) -> Result<(), JvmError> {
+        match self.load_link_field_descriptor(fd) {
+            Ok(opt) =>
+                match opt {
+                    None => {}
+                    Some(report) => classes.extend(report.all_loaded_classes.into_iter()),
+                },
+            Err(err) => match err {
+                JvmError::ClassLoadError(class_load_err) => match class_load_err {
+                    ClassLoadState::Loading | ClassLoadState::Loaded(_) => {},
+                    _ => return Result::Err(JvmError::ClassLoadError(class_load_err))
+                },
+                _ => return Result::Err(err)
+            }
         }
+
+        Result::Ok(())
+    }
+
+    fn handle_class_report(&mut self, classpath: &str, classes: &mut HashSet<Arc<Class>>) -> Result<(), JvmError> {
+        match self.load_and_link_class(classpath) {
+            Ok(report) => {
+                classes.extend(report.all_loaded_classes.into_iter());
+            }
+            Err(err) => match err {
+                JvmError::ClassLoadError(class_load_err) => match class_load_err {
+                    ClassLoadState::Loading | ClassLoadState::Loaded(_) => {},
+                    _ => return Result::Err(JvmError::ClassLoadError(class_load_err))
+                },
+                _ => return Result::Err(err)
+            }
+        }
+
+        Result::Ok(())
     }
 
     pub fn load_and_link_class(&mut self, classpath: &str) -> Result<ClassLoadReport, JvmError> {
@@ -131,13 +167,13 @@ impl ClassLoader {
         self.class_map
             .insert(String::from(classpath), ClassLoadState::Loading);
 
-        let mut class = load_class(bytes)?;
+        let mut class = deserialize_class(bytes)?;
 
         match &class.super_class {
             None => {}
             Some(superclass) => {
                 if !self.is_class_linked(superclass) {
-                    self.load_and_link_class(superclass).unwrap();
+                    self.handle_class_report(superclass, &mut all_loaded_classes)?;
                 }
 
                 let superclass = self.get_class(superclass).unwrap();
@@ -149,13 +185,13 @@ impl ClassLoader {
             match constant {
                 Constant::Class(utf8) => {
                     let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
-                    self.load_and_link_class(name).map(|_| ())?;
+                    self.handle_class_report(name, &mut all_loaded_classes)?;
                 }
                 Constant::FieldRef(class_name, name_and_type) => {
-                    self.load_and_link_class(
+                    self.handle_class_report(
                         class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                    )
-                    .unwrap();
+                        &mut all_loaded_classes
+                    )?;
 
                     let (_, descriptor) = class
                         .constant_pool
@@ -163,13 +199,13 @@ impl ClassLoader {
                         .unwrap();
                     let fd = FieldDescriptor::parse(descriptor)?;
 
-                    self.load_link_field_descriptor(&fd);
+                    self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
                 }
                 Constant::MethodRef(class_name, name_and_type) => {
-                    self.load_and_link_class(
+                    self.handle_class_report(
                         class.constant_pool.resolve_class_info(*class_name).unwrap(),
-                    )
-                    .unwrap();
+                        &mut all_loaded_classes
+                    )?;
 
                     let (_, descriptor) = class
                         .constant_pool
@@ -180,27 +216,16 @@ impl ClassLoader {
                     match md.return_type {
                         MethodReturnType::Void => {}
                         MethodReturnType::FieldDescriptor(fd) => {
-                            match self.load_link_field_descriptor(&fd) {
-                                None => {}
-                                Some(report) => {
-                                    if report.just_loaded {
-                                        all_loaded_classes.insert(report.class);
-                                    }
-                                }
-                            }
+                            self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
                         }
                     }
 
-                    for param in md.parameters.iter() {
-                        match self.load_link_field_descriptor(&param) {
-                            None => {}
-                            Some(report) => {
-                                if report.just_loaded {
-                                    all_loaded_classes.insert(report.class);
-                                }
-                            }
-                        }
-                    }
+                    md.parameters.iter().
+                        map(|param| {
+                            self.handle_load_link_fd(param, &mut all_loaded_classes)?;
+                            Result::Ok(())
+                        })
+                        .collect::<Result<Vec<()>, JvmError>>()?;
                 }
                 Constant::InterfaceMethodRef(_, _) => {}
                 Constant::NameAndType(_, _) => {}
@@ -220,25 +245,13 @@ impl ClassLoader {
 
         for (_, info) in rc.field_map.iter() {
             match &info.info.field_descriptor {
-                FieldDescriptor::ObjectType(fd_classpath) => {
-                    match self.load_and_link_class(fd_classpath) {
-                        Ok(report) => {
-                            if report.just_loaded {
-                                all_loaded_classes.insert(report.class);
-                            }
-                        },
-                        Err(error) => Result::Err(error)?
-                    };
-                    let report = self.load_and_link_class(fd_classpath).unwrap();
-                }
+                FieldDescriptor::ObjectType(fd_classpath) =>
+                    self.handle_class_report(fd_classpath, &mut all_loaded_classes)?,
                 FieldDescriptor::ArrayType(array_type) => {
                     if let FieldDescriptor::ObjectType(fd_classpath) =
                         array_type.field_descriptor.deref()
                     {
-                        let report = self.load_and_link_class(fd_classpath).unwrap();
-                        if report.just_loaded {
-                            all_loaded_classes.insert(report.class);
-                        }
+                        self.handle_class_report(fd_classpath, &mut all_loaded_classes)?
                     }
                 }
                 FieldDescriptor::JavaType(_) => {}
@@ -368,7 +381,7 @@ impl From<io::Error> for DeserializationError {
     }
 }
 
-pub fn load_class(bytes: &[u8]) -> Result<Class, DeserializationError> {
+pub fn deserialize_class(bytes: &[u8]) -> Result<Class, DeserializationError> {
     let mut rdr = Cursor::new(bytes);
 
     let magic = rdr.read_u32::<BigEndian>()?;
