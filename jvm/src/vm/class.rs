@@ -14,6 +14,7 @@ use crate::vm::vm::bytecode::Bytecode;
 use std::ops::Add;
 
 use std::mem::size_of;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug)]
 pub struct Class {
@@ -21,7 +22,7 @@ pub struct Class {
     pub constant_pool: ConstantPool,
     pub access_flags: u16,
     pub this_class: String,
-    pub super_class: String,
+    pub super_class: Option<String>,
     pub interfaces: Vec<u16>, //Index into the constant pool
     pub field_map: HashMap<String, ObjectField>,
     pub method_map: HashMap<(String, String), Arc<Method>>,
@@ -29,6 +30,20 @@ pub struct Class {
     pub heap_size: usize,
     pub full_heap_size: usize, //Heap size of this class plus the superclass
                                //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
+}
+
+impl PartialEq for Class {
+    fn eq(&self, other: &Self) -> bool {
+        self.this_class == other.this_class
+    }
+}
+
+impl Eq for Class {}
+
+impl Hash for Class {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.this_class.hash(state);
+    }
 }
 
 ///Method for easily creating classes

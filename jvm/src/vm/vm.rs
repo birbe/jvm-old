@@ -2,8 +2,8 @@ use crate::vm::class::{
     AccessFlags, Class, ClassError, FieldDescriptor, Method, MethodDescriptor, MethodReturnType,
     ParseError, RefInfoType,
 };
-use crate::vm::linker::loader::{ClassLoadState, ClassLoader, ClassProvider, DeserializationError};
-use std::collections::HashMap;
+use crate::vm::linker::loader::{ClassLoadState, ClassLoader, ClassProvider, DeserializationError, ClassLoadReport};
+use std::collections::{HashMap, HashSet};
 
 use std::convert::TryInto;
 use std::path::PathBuf;
@@ -45,12 +45,12 @@ impl VirtualMachine {
     pub fn spawn_thread(
         &mut self,
         thread_name: &str,
-        class: &str,
+        classpath: &str,
         method_name: &str,
         method_descriptor: &str,
         args: Vec<String>,
     ) -> Result<Arc<RwLock<RuntimeThread>>, JvmError> {
-        let (_, class) = self.class_loader.write()?.load_and_link_class(class)?;
+        let class_load_report = self.class_loader.write()?.load_and_link_class(classpath)?;
 
         let mut thread = RuntimeThread::new(
             String::from(thread_name),
@@ -59,8 +59,8 @@ impl VirtualMachine {
         );
 
         let mut frame = RuntimeThread::create_frame(
-            class.get_method(method_name, method_descriptor)?,
-            class.clone(),
+            class_load_report.class.get_method(method_name, method_descriptor)?,
+            class_load_report.class.clone(),
         );
 
         let mut index: u16 = 0;
@@ -84,9 +84,8 @@ impl VirtualMachine {
                 let allocated_string = self.heap.create_string(
                     arg,
                     self.class_loader
-                        .write()?
-                        .load_and_link_class("java/lang/String")?
-                        .1,
+                        .read()?
+                        .get_class("java/lang/String").ok_or(JvmError::ClassLoadError(ClassLoadState::NotFound))?
                 )?;
 
                 unsafe {
@@ -401,6 +400,66 @@ impl From<DeserializationError> for JvmError {
     }
 }
 
+///Attempt to resolve a class by reading first, then writing, finally erroring if necessary
+macro_rules! lazy_class_resolve {
+    ($classloader_rw:expr, $classname:expr) => {
+        {
+            let classloader_read = $classloader_rw.read()?;
+
+            match classloader_read.get_class($classname) {
+                None => {
+                    drop(classloader_read);
+                    $classloader_rw
+                        .write()?
+                        .load_and_link_class($classname)?
+                }
+                Some(class) => {
+                    drop(classloader_read);
+                    ClassLoadReport {
+                        just_loaded: false,
+                        class,
+                        all_loaded_classes: HashSet::new()
+                    }
+                }
+            }
+        }
+    }
+}
+
+///Initializes classes whenever necessary
+///This macro will step the instruction counter backwards if static(s) were loaded
+///
+/// ```Rust
+/// let was_initialized = init_static!(frame, frame_borrow, 3, class_load_report, self.frame_stack, { code });
+/// ```
+macro_rules! init_static {
+    ($frame:ident, $frame_borrow:ident, $bytecode_len:literal, $class_load_report:ident, $frame_stack:expr, $body:block) => {
+        {
+            let statics_to_init: Vec<Arc<Class>> = $class_load_report.all_loaded_classes.iter().filter(|&class|
+                        class.has_method("<clinit>", "()V")
+                    ).cloned().collect();
+
+            if statics_to_init.len() > 0 {
+                $frame.code.seek(SeekFrom::Current(-$bytecode_len))?;
+
+                drop($frame);
+                drop($frame_borrow);
+
+                statics_to_init.iter().for_each(|class| {
+                    $frame_stack.push(RwLock::new(
+                        RuntimeThread::create_frame(
+                            class.get_method("<clinit>", "()V").unwrap().clone(),
+                            class.clone()
+                        )
+                    ));
+                });
+            } else {
+                $body
+            }
+        }
+    }
+}
+
 pub struct RuntimeThread {
     heap: Arc<Heap>,
     classloader: Arc<RwLock<ClassLoader>>,
@@ -450,19 +509,19 @@ impl RuntimeThread {
     }
 
     pub fn step(&mut self) -> Result<(), JvmError> {
-        let mut frame_borrow = self
+        let mut frame_write = self
             .frame_stack
             .last()
             .ok_or(JvmError::EmptyFrameStack)?
             .write()
             .unwrap();
 
-        let frame = frame_borrow.deref_mut();
+        let frame = frame_write.deref_mut();
 
         let opcode_pos = frame.code.position();
 
         if opcode_pos as usize == frame.code.get_ref().len() {
-            drop(frame_borrow);
+            drop(frame_write);
 
             self.frame_stack.pop();
 
@@ -885,7 +944,7 @@ impl RuntimeThread {
             //ireturn
             0xac => {
                 let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                drop(frame_borrow);
+                drop(frame_write);
                 self.frame_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 let mut invoker = self
                     .frame_stack
@@ -898,7 +957,7 @@ impl RuntimeThread {
             //areturn
             0xb0 => {
                 let op = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                drop(frame_borrow);
+                drop(frame_write);
                 self.frame_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                 let mut invoker = self
                     .frame_stack
@@ -919,34 +978,24 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let classloader = self.classloader.read()?;
+                let class_name = field.class_name.to_owned();
 
-                let (just_loaded, class) = match classloader.get_class(field.class_name) {
-                    None => {
-                        drop(classloader);
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(field.class_name)?
-                    }
-                    Some(c) => {
-                        drop(classloader);
-                        (false, c)
-                    }
-                };
+                drop(field);
 
-                //TODO: the field wouldn't be initialized yet, need to defer
-                if just_loaded && class.has_method("<clinit>", "()V") {
-                    frame.code.seek(SeekFrom::Current(-3))?;
+                let class_load_report = lazy_class_resolve!(self.classloader, &class_name);
 
-                    drop(frame_borrow);
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                    let field = frame
+                    .class
+                    .constant_pool
+                    .resolve_ref_info(index as usize)
+                    .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                    self.frame_stack
-                        .push(RwLock::new(RuntimeThread::create_frame(
-                            class.get_method("<clinit>", "()V").unwrap(),
-                            class.clone(),
-                        )));
-                } else {
                     let fd = FieldDescriptor::parse(field.descriptor)?;
+
+                    let class = &class_load_report.class;
+
+                    let mut frame = self.frame_stack.last().unwrap().write().unwrap();
 
                     match &fd {
                         FieldDescriptor::JavaType(bt) => match bt {
@@ -1073,7 +1122,7 @@ impl RuntimeThread {
                                 .push(Operand(ot, result.unwrap_or(0) as usize));
                         }
                     };
-                }
+                });
             }
             //putstatic
             0xb3 => {
@@ -1084,32 +1133,13 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let classloader = self.classloader.read()?;
+                let class_load_report = lazy_class_resolve!(self.classloader, field.class_name);
 
-                let (just_loaded, class) = match classloader.get_class(field.class_name) {
-                    None => {
-                        drop(classloader);
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(field.class_name)?
-                    }
-                    Some(c) => {
-                        drop(classloader);
-                        (false, c)
-                    }
-                };
-
-                if just_loaded && class.has_method("<clinit>", "()V") {
-                    drop(frame_borrow);
-
-                    self.frame_stack
-                        .push(RwLock::new(RuntimeThread::create_frame(
-                            class.get_method("<clinit>", "()V").unwrap(),
-                            class.clone(),
-                        )));
-                } else {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
                     let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                     let fd = FieldDescriptor::parse(field.descriptor)?;
+
+                    let class = class_load_report.class.clone();
 
                     unsafe {
                         match &fd {
@@ -1179,7 +1209,7 @@ impl RuntimeThread {
                             }
                         };
                     }
-                }
+                });
             }
             //getfield
             0xb4 => {
@@ -1233,24 +1263,15 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let classloader_arc = self.classloader.clone();
-                let classloader_read = classloader_arc.read()?; //Bypass the borrow checker
+                let class_load_report = lazy_class_resolve!(self.classloader, fieldref.class_name);
 
-                let class = classloader_read
-                    .get_class(fieldref.class_name)
-                    .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
-                    .or_else(|_| {
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(fieldref.class_name)
-                            .map(|class| class.1)
-                    })?;
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                    let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                    let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
-
-                self.heap
-                    .put_field(object_ref, class, fieldref.name, value.1);
+                    self.heap
+                        .put_field(object_ref, class_load_report.class, fieldref.name, value.1);
+                });
             }
             //invokevirtual
             0xb6 => {
@@ -1262,99 +1283,94 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let method_descriptor = MethodDescriptor::parse(method_ref.descriptor)?;
+                let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                let param_len = method_descriptor.parameters.len();
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
 
-                let mut parameter_stack = Vec::with_capacity(param_len);
+                    let class = class_load_report.class;
 
-                println!("Parameter count: {}", &param_len);
+                    let method_descriptor = MethodDescriptor::parse(method_ref.descriptor)?;
 
-                for i in 0..param_len {
-                    let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                    let descriptor = method_descriptor
-                        .parameters
-                        .get(i)
-                        .ok_or(JvmError::EmptyOperandStack)?;
+                    let param_len = method_descriptor.parameters.len();
 
-                    if !descriptor.matches_operand(param.0) {
-                        panic!("Operand did not match parameter requirements.");
+                    let mut parameter_stack = Vec::with_capacity(param_len);
+
+                    println!("Parameter count: {}", &param_len);
+
+                    for i in 0..param_len {
+                        let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                        let descriptor = method_descriptor
+                            .parameters
+                            .get(i)
+                            .ok_or(JvmError::EmptyOperandStack)?;
+
+                        if !descriptor.matches_operand(param.0) {
+                            panic!("Operand did not match parameter requirements.");
+                        }
+
+                        parameter_stack.insert(param_len - i - 1, param);
                     }
 
-                    parameter_stack.insert(param_len - i - 1, param);
-                }
+                    let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
-                let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                    let object_info = self
+                        .heap
+                        .objects
+                        .get(object_ref.1)
+                        .ok_or(JvmError::InvalidObjectReference)?;
 
-                let object_info = self
-                    .heap
-                    .objects
-                    .get(object_ref.1)
-                    .ok_or(JvmError::InvalidObjectReference)?;
+                    if method_ref.info_type != RefInfoType::MethodRef {
+                        panic!("Invokevirtual must reference a MethodRef!");
+                    }
+                    if method_ref.name == "<init>" || method_ref.name == "<clinit>" {
+                        panic!("Invokevirtual must not invoke an initialization method!");
+                    }
 
-                if method_ref.info_type != RefInfoType::MethodRef {
-                    panic!("Invokevirtual must reference a MethodRef!");
-                }
-                if method_ref.name == "<init>" || method_ref.name == "<clinit>" {
-                    panic!("Invokevirtual must not invoke an initialization method!");
-                }
+                    let method = class.get_method(method_ref.name, method_ref.descriptor)?;
 
-                let class = self
-                    .classloader
-                    .read()?
-                    .get_class(method_ref.class_name)
-                    .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
-                    .or_else(|_| {
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(method_ref.class_name)
-                            .map(|class| class.1)
-                    })?;
-                //Attempts to simply read from the classloader and get the class. If this was not
-                //possible, attempt to load the class. Otherwise, return an error.
+                    let method_descriptor = MethodDescriptor::parse(&method.descriptor)?;
 
-                let method = class.get_method(method_ref.name, method_ref.descriptor)?;
+                    // if AccessFlags::is_protected(method.access_flags) {
+                    //     let is_superclass = jvm.recurse_is_superclass(frame.class.clone(), &method_ref.class_name);
+                    //     let are_siblings = VirtualMachine::are_classpaths_siblings(&frame.class.this_class, &method_ref.class_name);
+                    //
+                    //     if is_superclass && !are_siblings {
+                    //         if frame.class.this_class != object_info.class.this_class && !jvm.recurse_is_superclass(jvm.get_class(&object_info.class.this_class).clone(), &frame.class.this_class) {
+                    //             // panic!("AbstractMethodError");
+                    //         }
+                    //     }
+                    // }
 
-                let method_descriptor = MethodDescriptor::parse(&method.descriptor)?;
-
-                // if AccessFlags::is_protected(method.access_flags) {
-                //     let is_superclass = jvm.recurse_is_superclass(frame.class.clone(), &method_ref.class_name);
-                //     let are_siblings = VirtualMachine::are_classpaths_siblings(&frame.class.this_class, &method_ref.class_name);
-                //
-                //     if is_superclass && !are_siblings {
-                //         if frame.class.this_class != object_info.class.this_class && !jvm.recurse_is_superclass(jvm.get_class(&object_info.class.this_class).clone(), &frame.class.this_class) {
-                //             // panic!("AbstractMethodError");
-                //         }
-                //     }
-                // }
-
-                //Is polymorphic
-                //There has to be a better way to do this
-                let polymorphic: bool = {
-                    if class.this_class == "java/lang/invoke/MethodHandle"
-                        && method_descriptor.parameters.len() == 1
-                    {
-                        if let FieldDescriptor::ArrayType(at) = method_descriptor
-                            .parameters
-                            .first()
-                            .ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?
+                    //Is polymorphic
+                    //There has to be a better way to do this
+                    let polymorphic: bool = {
+                        if class.this_class == "java/lang/invoke/MethodHandle"
+                            && method_descriptor.parameters.len() == 1
                         {
-                            if at.dimensions == 1 {
-                                if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
-                                    if ot == "java/lang/Object" {
-                                        match method_descriptor.return_type {
-                                            MethodReturnType::FieldDescriptor(return_fd) => {
-                                                match return_fd {
-                                                    FieldDescriptor::ObjectType(return_ot)
-                                                        if return_ot == "java/lang/Object" =>
-                                                    {
-                                                        method.access_flags & 0x180 == 0x180
-                                                    }
+                            if let FieldDescriptor::ArrayType(at) = method_descriptor
+                                .parameters
+                                .first()
+                                .ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?
+                            {
+                                if at.dimensions == 1 {
+                                    if let FieldDescriptor::ObjectType(ot) = &*at.field_descriptor {
+                                        if ot == "java/lang/Object" {
+                                            match method_descriptor.return_type {
+                                                MethodReturnType::FieldDescriptor(return_fd) => {
+                                                    match return_fd {
+                                                        FieldDescriptor::ObjectType(return_ot)
+                                                            if return_ot == "java/lang/Object" =>
+                                                        {
+                                                            method.access_flags & 0x180 == 0x180
+                                                        }
 
-                                                    _ => false,
+                                                        _ => false,
+                                                    }
                                                 }
+                                                _ => false,
                                             }
-                                            _ => false,
+                                        } else {
+                                            false
                                         }
                                     } else {
                                         false
@@ -1368,39 +1384,37 @@ impl RuntimeThread {
                         } else {
                             false
                         }
-                    } else {
-                        false
+                    };
+
+                    if !polymorphic {
+                        let (resolved_class, method_to_invoke) = self
+                            .classloader
+                            .read()?
+                            .recurse_resolve_overridding_method(
+                                object_info.class.clone(),
+                                &method.name,
+                                &method.descriptor,
+                            )
+                            .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
+
+                        let mut new_frame =
+                            RuntimeThread::create_frame(method_to_invoke, resolved_class);
+
+                        new_frame
+                            .local_vars
+                            .insert(0, vec![Type::Reference(Reference::Class(object_ref.1))]);
+
+                        let mut index = 1;
+
+                        for item in parameter_stack {
+                            new_frame.local_vars.insert(index, Operand::as_type(item));
+                            index += 1;
+                        }
+
+                        drop(frame_write);
+                        self.frame_stack.push(RwLock::new(new_frame));
                     }
-                };
-
-                if !polymorphic {
-                    let (resolved_class, method_to_invoke) = self
-                        .classloader
-                        .read()?
-                        .recurse_resolve_overridding_method(
-                            object_info.class.clone(),
-                            &method.name,
-                            &method.descriptor,
-                        )
-                        .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
-
-                    let mut new_frame =
-                        RuntimeThread::create_frame(method_to_invoke, resolved_class);
-
-                    new_frame
-                        .local_vars
-                        .insert(0, vec![Type::Reference(Reference::Class(object_ref.1))]);
-
-                    let mut index = 1;
-
-                    for item in parameter_stack {
-                        new_frame.local_vars.insert(index, Operand::as_type(item));
-                        index += 1;
-                    }
-
-                    drop(frame_borrow);
-                    self.frame_stack.push(RwLock::new(new_frame));
-                }
+                });
             }
             //invokespecial https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-6.html#jvms-6.5.invokespecial
             0xb7 => {
@@ -1416,69 +1430,66 @@ impl RuntimeThread {
 
                 // println!("{}", method_d);
 
-                let method_class = self
-                    .classloader
-                    .read()?
-                    .get_class(method_ref.class_name)
-                    .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))
-                    .or_else(|_| {
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(method_ref.class_name)
-                            .map(|class| class.1)
-                    })?;
+                let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                let classloader = self.classloader.read()?;
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
 
-                let resolved_method =
-                    method_class.get_method(method_ref.name, method_ref.descriptor)?;
-                let to_invoke: (Arc<Class>, Arc<Method>) = if (method_class.access_flags & 0x20
-                    == 0x20)
-                    && classloader
-                        .recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
-                    && resolved_method.name != "<init>"
-                {
-                    classloader
-                        .recurse_resolve_supermethod_special(
-                            classloader
-                                .get_class(&frame.class.super_class)
-                                .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?,
-                            &resolved_method.name,
-                            &resolved_method.descriptor,
-                        )
-                        .ok_or(JvmError::UnresolvedSuper)?
-                } else {
-                    (method_class, resolved_method)
-                };
+                    let method_class = &class_load_report.class;
 
-                let mut new_frame = RuntimeThread::create_frame(to_invoke.1, to_invoke.0);
+                    let classloader = self.classloader.read()?;
 
-                let param_len = method_descriptor.parameters.len();
+                    //TODO: clean this up, this sucks
+                    let resolved_method =
+                        method_class.get_method(method_ref.name, method_ref.descriptor)?;
 
-                for i in 0..param_len {
-                    let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                    let descriptor = method_descriptor
-                        .parameters
-                        .get(i)
-                        .ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?;
+                    let to_invoke: (Arc<Class>, Arc<Method>) = if (method_class.access_flags & 0x20
+                        == 0x20)
+                        && classloader
+                            .recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
+                        && resolved_method.name != "<init>"
+                    {
+                        classloader
+                            .recurse_resolve_supermethod_special(
+                                classloader
+                                    .get_class(frame.class.super_class.as_deref().unwrap())
+                                    .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?,
+                                &resolved_method.name,
+                                &resolved_method.descriptor,
+                            )
+                            .ok_or(JvmError::UnresolvedSuper)?
+                    } else {
+                        (method_class.clone(), resolved_method)
+                    };
 
-                    if !descriptor.matches_operand(param.0) {
-                        panic!("Operand did not match parameter requirements.");
+                    let mut new_frame = RuntimeThread::create_frame(to_invoke.1, to_invoke.0);
+
+                    let param_len = method_descriptor.parameters.len();
+
+                    for i in 0..param_len {
+                        let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                        let descriptor = method_descriptor
+                            .parameters
+                            .get(i)
+                            .ok_or(JvmError::MethodError(MethodError::InvalidDescriptor))?;
+
+                        if !descriptor.matches_operand(param.0) {
+                            panic!("Operand did not match parameter requirements.");
+                        }
+
+                        new_frame
+                            .local_vars
+                            .insert((param_len - i) as u16, Operand::as_type(param));
                     }
 
-                    new_frame
-                        .local_vars
-                        .insert((param_len - i) as u16, Operand::as_type(param));
-                }
+                    new_frame.local_vars.insert(
+                        0,
+                        Operand::as_type(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?),
+                    ); //the objectref
 
-                new_frame.local_vars.insert(
-                    0,
-                    Operand::as_type(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?),
-                ); //the objectref
+                    drop(frame_write);
 
-                drop(frame_borrow);
-
-                self.frame_stack.push(RwLock::new(new_frame));
+                    self.frame_stack.push(RwLock::new(new_frame));
+                });
             }
             0xb8 => {
                 //invokestatic
@@ -1490,139 +1501,107 @@ impl RuntimeThread {
                     .resolve_ref_info(index as usize)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let classloader = self.classloader.read()?;
+                let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                let (just_loaded, class) = match classloader.get_class(method_ref.class_name) {
-                    None => {
-                        drop(classloader);
-                        self.classloader
-                            .write()?
-                            .load_and_link_class(method_ref.class_name)?
-                    }
-                    Some(c) => {
-                        drop(classloader);
-                        (false, c)
-                    }
-                };
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
 
-                let md = MethodDescriptor::parse(method_ref.descriptor)?;
-                let method = class.get_method(method_ref.name, method_ref.descriptor)?;
+                    let class = &class_load_report.class;
 
-                if AccessFlags::is_native(method.access_flags) {
-                    //Is native
-                    let mut argument_stack: Vec<Operand> = Vec::new();
-                    for _ in md.parameters.iter() {
-                        argument_stack
-                            .push(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?);
-                    }
+                    let md = MethodDescriptor::parse(method_ref.descriptor)?;
+                    let method = class.get_method(method_ref.name, method_ref.descriptor)?;
 
-                    let name = &*format!("{}|{}", class.this_class, method.name);
-
-                    let operands_out = match name {
-                        "Main|panic" => panic!("Java caused panic"),
-                        "Main|print_int" => {
-                            println!(
-                                "Main_print_int({})",
-                                argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1
-                            );
-
-                            Option::None
+                    if AccessFlags::is_native(method.access_flags) {
+                        //Is native
+                        let mut argument_stack: Vec<Operand> = Vec::new();
+                        for _ in md.parameters.iter() {
+                            argument_stack
+                                .push(frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?);
                         }
-                        "Main|print_string" => {
-                            let operand =
-                                argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
-                            let string_ref = operand.into_class_reference().unwrap();
-                            let string_obj = self.heap.objects.get(string_ref).unwrap();
 
+                        let name = &format!("{}|{}", class.this_class, method.name)[..];
 
-                            if string_obj.class.this_class == "java/lang/String" {
-                                let jstring: JString = string_obj.as_jstring().unwrap();
-                                let string: String = jstring.into();
+                        let operands_out = match name {
+                            "Main|panic" => panic!("Java caused panic"),
+                            "Main|print_int" => {
+                                println!(
+                                    "Main_print_int({})",
+                                    argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1
+                                );
 
-                                println!("{}", string);
-                                // Option::None
-                            } else {
-                                return Result::Err(JvmError::InvalidObjectReference) //Shouldn't happen
+                                Option::None
                             }
+                            "Main|print_string" => {
+                                let operand =
+                                    argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+                                let string_ref = operand.into_class_reference().unwrap();
+                                let string_obj = self.heap.objects.get(string_ref).unwrap();
 
-                            Option::None
-                        }
-                        "Main|get_time" => {
-                            let epoch = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
 
-                            let ops_out: Vec<Operand> =
-                                vec![Operand(OperandType::Long, epoch as usize)];
+                                if string_obj.class.this_class == "java/lang/String" {
+                                    let jstring: JString = string_obj.as_jstring().unwrap();
+                                    let string: String = jstring.into();
 
-                            Option::Some(ops_out)
-                        }
-                        "Main|print_long" => {
-                            println!("{:?}", frame.op_stack);
-                            let long = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
+                                    println!("{}", string);
+                                    // Option::None
+                                } else {
+                                    return Result::Err(JvmError::InvalidObjectReference) //Shouldn't happen
+                                }
 
-                            println!("Long: {}", long);
-
-                            Option::None
-                        }
-                        "Main|get_int" => Option::Some(vec![Operand(OperandType::Int, 1)]),
-                        _ => unimplemented!("Unimplemented native method \"{}\"", name),
-                    };
-
-                    match operands_out {
-                        None => {}
-                        Some(operands) => {
-                            for x in operands.into_iter() {
-                                frame.op_stack.push(x);
+                                Option::None
                             }
-                        }
-                    };
-                } else if just_loaded {
-                    let mut new_frame = RuntimeThread::create_frame(
-                        class.get_method("<init>", "()V")?,
-                        class.clone(),
-                    );
+                            "Main|get_time" => {
+                                let epoch = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_millis() as u64;
 
-                    for i in 0..md.parameters.len() {
-                        new_frame.local_vars.insert(
-                            i as u16,
-                            Operand::as_type(
-                                frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?,
-                            ),
-                        );
-                    }
+                                let ops_out: Vec<Operand> =
+                                    vec![Operand(OperandType::Long, epoch as usize)];
 
-                    drop(frame_borrow);
+                                Option::Some(ops_out)
+                            }
+                            "Main|print_long" => {
+                                println!("{:?}", frame.op_stack);
+                                let long = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
-                    self.frame_stack.push(RwLock::new(new_frame));
+                                println!("Long: {}", long);
 
-                    self.frame_stack
-                        .push(RwLock::new(RuntimeThread::create_frame(
-                            class.get_method("<clinit>", "()V")?,
+                                Option::None
+                            }
+                            "Main|get_int" => Option::Some(vec![Operand(OperandType::Int, 1)]),
+                            _ => unimplemented!("Unimplemented native method \"{}\"", name),
+                        };
+
+                        match operands_out {
+                            None => {}
+                            Some(operands) => {
+                                for x in operands.into_iter() {
+                                    frame.op_stack.push(x);
+                                }
+                            }
+                        };
+                    } else {
+                        let mut new_frame = RuntimeThread::create_frame(
+                            class.get_method(&method.name, &method.descriptor)?,
                             class.clone(),
-                        )));
-                } else {
-                    let mut new_frame = RuntimeThread::create_frame(
-                        class.get_method(&method.name, &method.descriptor)?,
-                        class.clone(),
-                    );
+                        );
 
-                    new_frame.local_vars = (0..md.parameters.len())
-                        .map(|i| {
-                            Result::Ok((
-                                i as u16,
-                                Operand::as_type(
-                                    frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?,
-                                ),
-                            ))
-                        })
-                        .collect::<Result<LocalVariableMap, JvmError>>()?;
+                        new_frame.local_vars = (0..md.parameters.len())
+                            .map(|i| {
+                                Result::Ok((
+                                    i as u16,
+                                    Operand::as_type(
+                                        frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?,
+                                    ),
+                                ))
+                            })
+                            .collect::<Result<LocalVariableMap, JvmError>>()?;
 
-                    drop(frame_borrow);
+                        drop(frame_write);
 
-                    self.frame_stack.push(RwLock::new(new_frame));
-                }
+                        self.frame_stack.push(RwLock::new(new_frame));
+                    }
+                });
             }
             //new
             0xbb => {
@@ -1633,37 +1612,17 @@ impl RuntimeThread {
                     .resolve_class_info(index)
                     .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                let classloader = self.classloader.read()?;
+                let class_load_report = lazy_class_resolve!(self.classloader, classpath);
 
-                let (just_loaded, class) = match classloader.get_class(classpath) {
-                    None => {
-                        drop(classloader);
-                        self.classloader.write()?.load_and_link_class(classpath)?
-                    }
-                    Some(c) => {
-                        drop(classloader);
-                        (false, c)
-                    }
-                };
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                    //TODO: there's probably some type checking and rules that need to be followed here
 
-                //TODO: there's probably some type checking and rules that need to be followed here
+                    let id = self.heap.create_object(class_load_report.class.clone())?;
 
-                let id = self.heap.create_object(class.clone())?;
-
-                frame
-                    .op_stack
-                    .push(Operand(OperandType::ClassReference, id));
-
-                if just_loaded && class.field_map.contains_key("<clinit>") {
-                    //Just loaded, we need to run <clinit>
-                    drop(frame_borrow);
-
-                    self.frame_stack
-                        .push(RwLock::new(RuntimeThread::create_frame(
-                            class.get_method("<clinit>", "()V")?,
-                            class.clone(),
-                        )));
-                }
+                    frame
+                        .op_stack
+                        .push(Operand(OperandType::ClassReference, id));
+                });
             }
             0xbc => {
                 let atype = frame.code.read_u8()?;
