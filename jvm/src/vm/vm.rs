@@ -1902,7 +1902,7 @@ pub mod bytecode {
         Pop,                     //0x57
         Pop2,                    //0x58
         Putfield(u16),           //0xb5
-        Putstatic,               //0xb3
+        Putstatic(u16),          //0xb3
         Ret,                     //0xa9
         Return,                  //0xb1
         Saload,                  //0x35
@@ -2155,7 +2155,7 @@ pub mod bytecode {
                         0x57 => Self::Pop,
                         0x58 => Self::Pop2,
                         0xb5 => Self::Putfield(cursor.read_u16::<BigEndian>()?),
-                        0xb3 => Self::Putstatic,
+                        0xb3 => Self::Putstatic(cursor.read_u16::<BigEndian>()?),
                         0xa9 => Self::Ret,
                         0xb1 => Self::Return,
                         0x35 => Self::Saload,
@@ -2404,7 +2404,7 @@ pub mod bytecode {
                     Bytecode::Putfield(bytes) => {
                         vec![0xb5, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1]]
                     }
-                    Bytecode::Putstatic => vec![0xb3],
+                    Bytecode::Putstatic(bytes) => vec![0xb3, bytes.to_be_bytes()[0], bytes.to_be_bytes()[1]],
                     Bytecode::Ret => vec![0xa9],
                     Bytecode::Return => vec![0xb1],
                     Bytecode::Saload => vec![0x35],
