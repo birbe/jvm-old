@@ -12,7 +12,7 @@ use crate::vm::class::JavaType;
 
 use crate::vm::class::constant::Constant;
 use byteorder::{BigEndian, ReadBytesExt};
-use std::io::{Cursor, Error, Seek, SeekFrom};
+use std::io::{Cursor, Error, Seek, SeekFrom, Write};
 
 use std::mem::size_of;
 
@@ -20,24 +20,34 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vm::heap::{Heap, InternArrayType, JString, Reference, Type};
 use std::iter::FromIterator;
-use std::ops::DerefMut;
+use std::ops::{DerefMut, Add};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::fmt::{Debug, Formatter};
 
-pub struct VirtualMachine {
-    pub threads: HashMap<String, Arc<RwLock<RuntimeThread>>>,
+pub struct VirtualMachine<Stdout: Write + Send + Sync> {
+    pub threads: HashMap<String, Arc<RwLock<RuntimeThread<Stdout>>>>,
     pub class_loader: Arc<RwLock<ClassLoader>>,
+    pub std_out: Arc<RwLock<Stdout>>,
     pub heap: Arc<Heap>,
 }
 
-impl VirtualMachine {
-    pub fn new(class_provider: Box<dyn ClassProvider>) -> VirtualMachine {
+impl<Stdout: Write + Send + Sync> VirtualMachine<Stdout> {
+    pub fn new(class_provider: Box<dyn ClassProvider>, std_out: Stdout) -> VirtualMachine<Stdout> {
         VirtualMachine {
             threads: HashMap::new(),
 
             class_loader: Arc::new(RwLock::new(ClassLoader::new(class_provider))),
+            std_out: Arc::new(RwLock::new(std_out)),
             heap: Arc::new(Heap::new(1024 * 1024)),
         }
+    }
+
+    pub fn get_stdout(&self) -> Arc<RwLock<Stdout>> {
+        self.std_out.clone()
+    }
+
+    pub fn get_thread(&self, name: &str) -> Option<Arc<RwLock<RuntimeThread<Stdout>>>> {
+        self.threads.get(name).cloned()
     }
 
     pub fn spawn_thread(
@@ -47,7 +57,7 @@ impl VirtualMachine {
         method_name: &str,
         method_descriptor: &str,
         args: Vec<String>,
-    ) -> Result<Arc<RwLock<RuntimeThread>>, JvmError> {
+    ) -> Result<Arc<RwLock<RuntimeThread<Stdout>>>, JvmError> {
         let mut class_loader = self.class_loader.write()?;
         let class_load_report = class_loader.load_and_link_class(classpath)?;
 
@@ -55,9 +65,10 @@ impl VirtualMachine {
             String::from(thread_name),
             self.heap.clone(),
             self.class_loader.clone(),
+            self.std_out.clone()
         );
 
-        let mut frame = RuntimeThread::create_frame(
+        let mut frame = RuntimeThread::<Stdout>::create_frame(
             class_load_report.class.get_method(method_name, method_descriptor)?,
             class_load_report.class.clone(),
         );
@@ -103,7 +114,7 @@ impl VirtualMachine {
         class_load_report.all_loaded_classes.into_iter().for_each(|class| {
             match class.get_method("<clinit>", "()V") {
                 Ok(method) => {
-                    thread.add_frame(RuntimeThread::create_frame(
+                    thread.add_frame(RuntimeThread::<Stdout>::create_frame(
                         method,
                         class
                     ));
@@ -281,6 +292,10 @@ impl LocalVariableMap {
     fn contains_key(&self, key: u16) -> bool {
         self.map.contains_key(&key)
     }
+
+    pub fn as_ref(&self) -> &HashMap<u16, Type> {
+        &self.map
+    }
 }
 
 impl Default for LocalVariableMap {
@@ -308,6 +323,30 @@ pub struct Frame {
     op_stack: Vec<Operand>,
     code: Cursor<Vec<u8>>,
     class: Arc<Class>,
+}
+
+impl Frame {
+
+    pub fn get_code_cursor(&self) -> &Cursor<Vec<u8>> {
+        &self.code
+    }
+
+    pub fn get_class(&self) -> Arc<Class> {
+        self.class.clone()
+    }
+
+    pub fn get_method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn get_operand_stack(&self) -> &[Operand] {
+        &self.op_stack[..]
+    }
+
+    pub fn get_local_variables(&self) -> &LocalVariableMap {
+        &self.local_vars
+    }
+
 }
 
 impl Debug for Frame {
@@ -452,7 +491,7 @@ macro_rules! lazy_class_resolve {
 /// let was_initialized = init_static!(frame, frame_borrow, 3, class_load_report, self.frame_stack, { code });
 /// ```
 macro_rules! init_static {
-    ($frame:ident, $frame_borrow:ident, $bytecode_len:literal, $class_load_report:ident, $frame_stack:expr, $body:block) => {
+    ($frame:ident, $frame_borrow:ident, $bytecode_len:literal, $class_load_report:ident, $frame_stack:expr, $stdout:ident, $body:block) => {
         {
             let statics_to_init: Vec<Arc<Class>> = $class_load_report.all_loaded_classes.iter().filter(|&class|
                         class.has_method("<clinit>", "()V")
@@ -466,7 +505,7 @@ macro_rules! init_static {
 
                 statics_to_init.iter().for_each(|class| {
                     $frame_stack.push(RwLock::new(
-                        RuntimeThread::create_frame(
+                        RuntimeThread::<Stdout>::create_frame(
                             class.get_method("<clinit>", "()V").unwrap().clone(),
                             class.clone()
                         )
@@ -479,24 +518,27 @@ macro_rules! init_static {
     }
 }
 
-pub struct RuntimeThread {
+pub struct RuntimeThread<Stdout: Write + Send + Sync> {
     heap: Arc<Heap>,
     classloader: Arc<RwLock<ClassLoader>>,
+    std_out: Arc<RwLock<Stdout>>,
 
     thread_name: Arc<String>,
     frame_stack: Vec<RwLock<Frame>>,
 }
 
-impl RuntimeThread {
+impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
     pub fn new(
         name: String,
         heap: Arc<Heap>,
         classloader: Arc<RwLock<ClassLoader>>,
-    ) -> RuntimeThread {
+        std_out: Arc<RwLock<Stdout>>
+    ) -> RuntimeThread<Stdout> {
         RuntimeThread {
             heap,
             classloader,
 
+            std_out,
             thread_name: Arc::new(name),
             frame_stack: Vec::new(),
         }
@@ -528,10 +570,6 @@ impl RuntimeThread {
     }
 
     pub fn step(&mut self) -> Result<(), JvmError> {
-        {
-            println!("{:?}", self.frame_stack.last().unwrap().read().unwrap());
-        }
-
         let mut frame_write = self
             .frame_stack
             .last()
@@ -1008,7 +1046,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, &class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
                     let fd = FieldDescriptor::parse(field.descriptor)?;
 
                     let class = &class_load_report.class;
@@ -1151,7 +1189,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, field.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
                     let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                     let fd = FieldDescriptor::parse(field.descriptor)?;
 
@@ -1281,7 +1319,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, fieldref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
                     let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                     let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
@@ -1301,7 +1339,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
 
                     let class = class_load_report.class;
 
@@ -1310,8 +1348,6 @@ impl RuntimeThread {
                     let param_len = method_descriptor.parameters.len();
 
                     let mut parameter_stack = Vec::with_capacity(param_len);
-
-                    println!("Parameter count: {}", &param_len);
 
                     for i in 0..param_len {
                         let param = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
@@ -1414,7 +1450,7 @@ impl RuntimeThread {
                             .ok_or(JvmError::ClassLoadError(ClassLoadState::NotLoaded))?;
 
                         let mut new_frame =
-                            RuntimeThread::create_frame(method_to_invoke, resolved_class);
+                            RuntimeThread::<Stdout>::create_frame(method_to_invoke, resolved_class);
 
                         new_frame
                             .local_vars
@@ -1448,7 +1484,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
 
                     let method_class = &class_load_report.class;
 
@@ -1477,7 +1513,7 @@ impl RuntimeThread {
                         (method_class.clone(), resolved_method)
                     };
 
-                    let mut new_frame = RuntimeThread::create_frame(to_invoke.1, to_invoke.0);
+                    let mut new_frame = RuntimeThread::<Stdout>::create_frame(to_invoke.1, to_invoke.0);
 
                     let param_len = method_descriptor.parameters.len();
 
@@ -1519,7 +1555,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
 
                     let class = &class_load_report.class;
 
@@ -1550,16 +1586,13 @@ impl RuntimeThread {
                                 let operand =
                                     argument_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                                 let string_ref = operand.into_class_reference().unwrap();
-                                dbg!(string_ref);
                                 let string_obj = self.heap.objects.get(string_ref).unwrap();
-
 
                                 if string_obj.class.this_class == "java/lang/String" {
                                     let jstring: JString = string_obj.as_jstring().unwrap();
                                     let string: String = jstring.into();
 
-                                    println!("{}", string);
-                                    // Option::None
+                                    self.std_out.write().unwrap().write(string.add("\n").as_bytes()).unwrap();
                                 } else {
                                     return Result::Err(JvmError::InvalidObjectReference) //Shouldn't happen
                                 }
@@ -1598,7 +1631,7 @@ impl RuntimeThread {
                             }
                         };
                     } else {
-                        let mut new_frame = RuntimeThread::create_frame(
+                        let mut new_frame = RuntimeThread::<Stdout>::create_frame(
                             class.get_method(&method.name, &method.descriptor)?,
                             class.clone(),
                         );
@@ -1631,7 +1664,7 @@ impl RuntimeThread {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, classpath);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, {
+                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
                     //TODO: there's probably some type checking and rules that need to be followed here
 
                     let id = self.heap.create_object(class_load_report.class.clone())?;
@@ -1683,6 +1716,10 @@ impl RuntimeThread {
 
     pub fn get_stack_count(&self) -> usize {
         self.frame_stack.len()
+    }
+
+    pub fn get_frames(&self) -> &Vec<RwLock<Frame>> {
+        &self.frame_stack
     }
 }
 

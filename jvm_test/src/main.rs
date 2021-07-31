@@ -1,12 +1,25 @@
-use jvm::vm::vm::VirtualMachine;
+use jvm::vm::vm::{VirtualMachine, JvmError};
 
 use clap::{App, Arg};
 use jvm::vm::class::constant::Constant;
 use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
 use jvm::vm::linker::loader::ClassProvider;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::thread;
+use std::sync::{Arc, RwLock, mpsc};
+use std::{thread, io};
+use tui::Terminal;
+use tui::layout::{Layout, Direction, Constraint};
+use tui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use tui::backend::TermionBackend;
+use termion::raw::IntoRawMode;
+use tui::text::{Span, Spans, Text};
+use tui::style::{Style, Color};
+use termion::input::TermRead;
+use jvm::vm::vm::bytecode::Bytecode;
+use termion::event::Key;
+use std::process::exit;
+use std::io::{Write, stdout, Cursor};
+use std::ops::Deref;
 
 fn main() {
     let app = App::new("Rust JVM Test")
@@ -16,7 +29,7 @@ fn main() {
             Arg::with_name("mode")
                 .long("mode")
                 .short("m")
-                .help("Modes: `wasm` or `i` (interpreted)")
+                .help("Modes: `i` (interpreted), 'serialization', and 'stepper'")
                 .takes_value(true)
                 .required(true),
         )
@@ -25,81 +38,6 @@ fn main() {
     let mode = app.value_of("mode").unwrap();
 
     match mode {
-        "wasm" => {
-            // let mut cl = ClassLoader::new(javaroot);
-            //
-            // let (_, class) = cl.load_and_link_class("Main").ok().unwrap();
-            //
-            // println!("Creating WASM");
-            //
-            // let mut wasm = WasmEmitter::new(&cl, "Main!main!([Ljava/lang/String;)V");
-            //
-            // wasm.process_classes();
-            //
-            // let (wasm, memory) = wasm.build();
-            //
-            // fs::write("./jvm_test/wasm_out/out.wasm", &wasm);
-            //
-            // {
-            //     let store = Store::default();
-            //
-            //     let module = Module::from_binary(store.engine(), &wasm[..]).unwrap();
-            //
-            //     let get_time = Func::wrap(&store, || {
-            //         return SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-            //     });
-            //
-            //     let print_long = Func::wrap(&store, |x: i64| {
-            //         println!("Printed long {}", x);
-            //     });
-            //
-            //     let print_int = Func::wrap(&store, |x: i32| {
-            //         println!("{}", x);
-            //     });
-            //
-            //     let print_string = Func::wrap(&store,|caller: Caller, x: i32| {
-            //         let memory = caller.get_export("heap").unwrap().into_memory().unwrap();
-            //
-            //         unsafe {
-            //             let data = memory.data_unchecked();
-            //
-            //             let str = String::from_utf8(Vec::from(&data[4..100])).unwrap();
-            //
-            //             println!("{}", str);
-            //
-            //             let u = x as usize;
-            //             let classpath_utf8_ptr = LittleEndian::read_u32(&data[u..u+4]) as usize;
-            //             let classpath_utf8_len = LittleEndian::read_u32(&data[classpath_utf8_ptr..classpath_utf8_ptr+4]);
-            //
-            //             let char_arr_ptr = LittleEndian::read_u32(&data[u+4..u+8]) as usize;
-            //             let char_arr_len = LittleEndian::read_u32(&data[char_arr_ptr..char_arr_ptr+4]) as usize;
-            //
-            //             let chars = &data[char_arr_ptr+4..char_arr_ptr + (char_arr_len * 2) + 4];
-            //
-            //             println!("{}", String::from_utf8(Vec::from(chars)).unwrap());
-            //         }
-            //     });
-            //
-            //     let mut imports = vec![
-            //         // print_string.into(),
-            //         print_int.into()
-            //     ];
-            //
-            //     let instance = Instance::new(&store, &module, &imports).unwrap();
-            //
-            //     let heap = instance.get_export("heap").unwrap().into_memory().unwrap();
-            //
-            //     let mem_ptr = heap.data_ptr();
-            //
-            //     unsafe {
-            //         heap.data_unchecked_mut().write(&memory.data[..]);
-            //     }
-            //
-            //     instance.get_export("main").unwrap().into_func().unwrap().call(
-            //         &[Val::I32(100)]
-            //     );
-            // }
-        }
         "i" => {
             run_vm();
         }
@@ -141,7 +79,10 @@ fn main() {
             class_builder.add_method(method_builder);
 
             dbg!(class_builder.serialize());
-        }
+        },
+        "stepper" => {
+            stepper();
+        } ,
         _ => panic!("Unknown execution method. Must be `wasm` or `i` (interpreted)"),
     }
 }
@@ -165,7 +106,7 @@ macro_rules! insert_class {
     };
 }
 
-fn run_vm() {
+fn create_vm<Stdout: Write + Send + Sync>(stdout: Stdout) -> Arc<RwLock<VirtualMachine<Stdout>>> {
     let mut class_provider = HashMapClassProvider {
         map: HashMap::new(),
     };
@@ -175,7 +116,10 @@ fn run_vm() {
     insert_class!(class_provider, "java/lang/Object");
     insert_class!(class_provider, "java/lang/String");
 
-    let vm = Arc::new(RwLock::new(VirtualMachine::new(Box::new(class_provider))));
+    let vm = Arc::new(
+        RwLock::new(VirtualMachine::new(Box::new(class_provider), stdout)
+        )
+    );
 
 
     {
@@ -188,7 +132,7 @@ fn run_vm() {
             "([Ljava/lang/String;)V",
             vec![String::from("Hello world!")],
         )
-        .unwrap();
+            .unwrap();
 
         vm.spawn_thread(
             "thread 2",
@@ -197,10 +141,15 @@ fn run_vm() {
             "([Ljava/lang/String;)V",
             vec![String::from("Hello world!")],
         )
-        .unwrap();
-
-        // let mut step_start = SystemTime::now();
+            .unwrap();
     }
+
+    vm
+}
+
+fn run_vm() {
+
+    let vm = create_vm(Box::new(stdout()));
 
     let vm1 = vm.clone();
 
@@ -236,6 +185,158 @@ fn run_vm() {
     // let elapsed = SystemTime::now().duration_since(start).unwrap().as_nanos();
 
     // println!("\n[Execution has finished.]\nAverage step time: {}ns\nSteps: {}\nTime elapsed: {}ms\nObject count: {}", elapsed/steps, steps, SystemTime::now().duration_since(start).unwrap().as_millis(), vm.heap.read().unwrap().objects.len());
+}
+
+fn stepper() {
+    let jvm_stdout = Cursor::new(Vec::<u8>::new());
+
+    let vm = create_vm(jvm_stdout);
+
+    let stdout = io::stdout().into_raw_mode().unwrap();
+
+    let backend = TermionBackend::new(stdout);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.clear().unwrap();
+
+    let (tx, rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let stdin = io::stdin();
+        for event in stdin.keys() {
+            tx.send(event.unwrap()).unwrap();
+        }
+    });
+
+    loop {
+
+        let key = rx.recv().unwrap();
+
+        let vm_write = vm.read().unwrap();
+
+        let thread_rw = vm_write.get_thread("thread 1").unwrap();
+        let mut thread = thread_rw.write().unwrap();
+
+        match key {
+            Key::Char('\n') => {
+                match thread.step() {
+                    Ok(_) => {}
+                    Err(err) => match err {
+                        JvmError::EmptyFrameStack => exit(0),
+                        _ => panic!("{:?}", err)
+                    }
+                }
+            },
+            Key::Esc => exit(0),
+            _ => {}
+        }
+
+        if thread.get_stack_count() == 0 {
+            exit(0);
+        }
+
+        let frame = thread.get_frames().last().unwrap().read().unwrap();
+
+        let instructions = frame.get_code_cursor().get_ref();
+        let mut instruction_items = Vec::new();
+
+        //Bad to do this over and over but who cares I'll refactor it later
+        let bytecodes = Bytecode::from_bytes_with_indices(0, &instructions[..]).unwrap();
+
+        for (bytecode, index) in bytecodes {
+            let mut style = Style::default();
+
+            if index == frame.get_code_cursor().position() {
+                style = style.fg(Color::Black).bg(Color::White);
+            }
+
+            let span = Span::styled(
+                format!("{:?} {}", bytecode, index), style
+            );
+
+            instruction_items.push(ListItem::new(Spans::from(span)));
+        }
+
+        terminal.draw(|frame| {
+            let main_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(
+                    [
+                        Constraint::Percentage(60),
+                        Constraint::Percentage(40),
+                    ].as_ref()
+                )
+                .split(frame.size());
+
+            let chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(
+                    [
+                        Constraint::Percentage(25),
+                        Constraint::Percentage(25),
+                        Constraint::Percentage(25)
+                    ].as_ref()
+                )
+                .split(main_chunks[0]);
+
+            let instructions_block = Block::default()
+                .title("Instructions")
+                .borders(Borders::ALL);
+
+            let frame_stack_block = Block::default()
+                .title("Frames")
+                .borders(Borders::ALL);
+
+            let instructions_list = List::new(
+                instruction_items
+            )
+                .block(instructions_block);
+
+            let frame_stack_list = List::new(
+                thread.get_frames().iter().rev().map(|frame| {
+                    let frame_read = frame.read().unwrap();
+
+                    let name = format!("{}#{}", frame_read.get_class().this_class, frame_read.get_method_name());
+
+                    ListItem::new(Spans::from(
+                        Span::styled(name, Style::default())
+                    ))
+                }).collect::<Vec<ListItem>>()
+            ).block(frame_stack_block);
+
+            let operand_stack_block = Block::default()
+                .title("Operands")
+                .borders(Borders::ALL);
+
+            let operands_list = List::new(
+                thread.get_frames().last().unwrap().read().unwrap().get_operand_stack().iter().rev().map(|&op| {
+                    ListItem::new(Spans::from(
+                        Span::styled(format!("{:?}", op), Style::default())
+                    ))
+                }).collect::<Vec<ListItem>>()
+            ).block(operand_stack_block);
+
+            let stdout_block = Block::default()
+                .title("Stdout")
+                .borders(Borders::ALL);
+
+            let stdout_arc = vm_write.get_stdout();
+            let stdout_read = stdout_arc.read().unwrap();
+
+            let stdout_paragraph = Paragraph::new(
+                Spans::from(
+                    Span::raw(
+                        String::from_utf8_lossy(stdout_read.get_ref())
+                    )
+                )
+            );
+
+            frame.render_widget(instructions_list, chunks[0]);
+            frame.render_widget(frame_stack_list, chunks[1]);
+            frame.render_widget(operands_list, chunks[2]);
+            frame.render_widget(stdout_paragraph, main_chunks[1]);
+        }).unwrap();
+    }
 }
 
 #[cfg(test)]
