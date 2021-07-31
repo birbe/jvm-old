@@ -329,7 +329,7 @@ fn stepper() {
                         String::from_utf8_lossy(stdout_read.get_ref())
                     )
                 )
-            );
+            ).block(stdout_block);
 
             frame.render_widget(instructions_list, chunks[0]);
             frame.render_widget(frame_stack_list, chunks[1]);
