@@ -2,6 +2,8 @@
 
 ![badge](https://img.shields.io/badge/version-0.1.0-f39f37) ![Rust](https://github.com/Birbe/jvm/workflows/Rust/badge.svg)
 
+### Warning! This crate is absurdly unsafe at the moment.
+
 ___
 
 A pure Rust implementation of the JVM 7 spec, with the main goals being to be able to eventually:
@@ -11,15 +13,9 @@ A pure Rust implementation of the JVM 7 spec, with the main goals being to be ab
 
 ## Roadmap
 
-#### Classloader status
-
 - [x] Deserialize Java 7 classes
-- [ ] Type-checking of the bytecode (!)
-- [x] Cleanup the deserialization code
+- [ ] Type-checking of bytecode (!)
 
-Currently, none of the code is type-checked, so only input Java that you trust.
-
-#### Roadmap
 
 - [x] Get basic bytecode running
 - [x] Get heap allocation and object creation working
@@ -37,37 +33,17 @@ Currently, none of the code is type-checked, so only input Java that you trust.
 
 ## Library Usage
 
-```Rust
-let classpath_root = PathBuf::from("path to root of compiled classes");
-
-let vm = VirtualMachine::new(classpath_root);
-
-vm.class_loader.borrow_mut().load_and_link_class("classpath of main class");
-
-vm.spawn_thread(
-    String::from("Main thread"), 
-    "Main", //classpath
-    "main", 
-    "([Ljava/lang/String;)V", //method returns void, takes String[]
-    vec![ //String arguments
-        String::from("String arguments!")
-    ]
-);
-
-let mut mut_thread = vm.threads.get_mut("Main thread").unwrap();
-
-while mut_thread.get_stack_count() > 0 {
-    match mut_thread.step() {
-        Ok(_) => {}
-        Err(e) => panic!(format!("JVM errored while stepping! Error:\n{:?}", e))
-    }
-}
-```
-
-Or, run the jvm_test package
+Look in main.rs of the jvm_test crate for an example.
 
 ```
-cargo run -p jvm_test -- --mode [Mode]
+cargo run -p jvm_test -- --mode <i, stepper>
 ```
 
 ---
+
+## Unsafety
+
+This library is under heavy development, and as such is very unstable and unsafe(!) to use. The main issues arise from
+the fact that executed bytecode is not currently type-checked.
+
+TLDR: don't use this for anything important, nor on anything you don't trust.
