@@ -232,12 +232,16 @@ fn stepper() {
 
         let frame = thread.get_frames().last().unwrap().read();
 
+        let mut index = 0;
+
         let instruction_items: Vec<ListItem> = frame.code.iter().map(|(bytecode, offset)| {
             let mut style = Style::default();
 
-            if offset == frame.offset_bytecode_bimap.get_by_right(&frame.pc).unwrap() {
+            if index == frame.pc {
                 style = style.fg(Color::Black).bg(Color::White);
             }
+
+            index += 1;
 
             let span = Span::styled(
                 format!("{:?} {}", bytecode, offset), style
