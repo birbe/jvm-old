@@ -1,20 +1,18 @@
-use crate::vm::class::attribute::Attribute;
-use crate::vm::class::constant::Constant;
-
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, Write};
 
-use crate::vm::vm::OperandType;
-
 use std::sync::Arc;
-
-use crate::vm::vm::bytecode::Bytecode;
 
 use std::ops::Add;
 
 use std::mem::size_of;
 use std::hash::{Hash, Hasher};
+use crate::class::attribute::Attribute;
+use crate::class::constant::Constant;
+use bitflags::bitflags;
+use crate::bytecode::Bytecode;
+use crate::OperandType;
 
 #[derive(Debug)]
 pub struct Class {
@@ -48,9 +46,10 @@ impl Hash for Class {
 
 ///Method for easily creating classes
 ///
-/// ```
-/// use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
-/// use jvm::vm::vm::bytecode::Bytecode;
+///```
+/// use jvm::class::{MethodBuilder, ClassBuilder, MethodDescriptor};
+/// use jvm::bytecode::Bytecode;
+///
 /// let mut class_builder = ClassBuilder::new(String::from("java/lang/Object"), Option::None);
 /// let mut method_builder = MethodBuilder::new(String::from("<init>"), MethodDescriptor::parse("();").unwrap(), 1);
 ///
@@ -142,7 +141,9 @@ impl ClassBuilder {
             .write_u16::<BigEndian>(self.field_map.len() as u16)
             .unwrap();
 
-        cursor.into_inner()
+        cursor.into_inner();
+
+        unimplemented!();
     }
 }
 
@@ -302,28 +303,34 @@ impl Default for ConstantPool {
 // }
 
 //Access flags for methods and classes
-pub enum AccessFlags {
-    PUBLIC = 0x1,
-    PRIVATE = 0x2,
-    PROTECTED = 0x4,
-    STATIC = 0x8,
-    FINAL = 0x10,
-    SYNCHRONIZED = 0x20,
-    BRIDGE = 0x40,
-    VARARGS = 0x80,
-    NATIVE = 0x100,
-    ABSTRACT = 0x400,
-    STRICT = 0x800,
-    SYNTHETIC = 0x1000,
+bitflags! {
+
+    pub struct AccessFlags: u16 {
+
+        const PUBLIC        = 0x1;
+        const PRIVATE      = 0x2;
+        const PROTECTED    = 0x4;
+        const STATIC       = 0x8;
+        const FINAL        = 0x10;
+        const SYNCHRONIZED = 0x20;
+        const BRIDGE       = 0x40;
+        const VARARGS      = 0x80;
+        const NATIVE       = 0x100;
+        const ABSTRACT     = 0x400;
+        const STRICT       = 0x800;
+        const SYNTHETIC    = 0x1000;
+
+    }
+
 }
 
 impl AccessFlags {
     pub fn is_native(flags: u16) -> bool {
-        flags & 0x100 == 0x100
+        flags & Self::NATIVE.bits == Self::NATIVE.bits
     }
 
     pub fn is_protected(flags: u16) -> bool {
-        flags & 0x4 == 0x4
+        flags & Self::PROTECTED.bits == Self::PROTECTED.bits
     }
 }
 
@@ -335,7 +342,7 @@ pub struct Method {
     pub descriptor: String,
     pub descriptor_index: u16,
     pub attributes_count: u16,
-    pub attribute_map: HashMap<String, Attribute>,
+    pub attribute_map: HashMap<String, Arc<Attribute>>,
 }
 
 pub struct MethodBuilder {
@@ -491,6 +498,7 @@ pub enum ParseError {
     NoneError,
     StringError,
     ClassError(ClassError),
+    InvalidPayload
 }
 
 impl From<std::io::Error> for ParseError {
@@ -665,11 +673,11 @@ impl Method {
                 attr_count
             },
             attribute_map: {
-                let mut attr_map: HashMap<String, Attribute> = HashMap::new();
+                let mut attr_map= HashMap::new();
 
                 for _ in 0..attr_count {
                     let attr = Attribute::from_bytes(rdr, constant_pool)?;
-                    attr_map.insert(String::from(&attr.attribute_name), attr);
+                    attr_map.insert(String::from(&attr.attribute_name), Arc::new(attr));
                 }
 
                 attr_map
@@ -725,11 +733,13 @@ impl FieldInfo {
 //of the aforementioned types, however. The most direct analogy would be they are like Java annotations
 //for the JVM, ironically, because Annotations are actually a form of attribute at compile-time.
 pub mod attribute {
-    use crate::vm::class::attribute::stackmap::StackMapFrame;
-    use crate::vm::class::constant::Constant;
-    use crate::vm::class::{ClassError, ConstantPool, ParseError};
-    use byteorder::{BigEndian, ReadBytesExt};
     use std::io::{Read, Seek, SeekFrom};
+    use crate::class::{ConstantPool, ParseError, ClassError};
+    use byteorder::{BigEndian, ReadBytesExt};
+    use crate::class::constant::Constant;
+    use crate::class::attribute::stackmap::StackMapFrame;
+    use std::sync::Arc;
+    use crate::bytecode::Bytecode;
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.7
     #[derive(Debug)]
@@ -784,12 +794,11 @@ pub mod attribute {
                                 code_len
                             },
                             code: {
-                                let mut vec: Vec<u8> = Vec::new();
-                                for _ in 0..code_len {
-                                    vec.push(rdr.read_u8()?)
-                                }
+                                let mut bytes = vec![0u8; code_len as usize];
+                                rdr.read_exact(&mut bytes[..]);
+                                let bytecode = Bytecode::from_bytes_with_indices(0, &bytes).map_err(|_| ParseError::InvalidPayload)?;
 
-                                vec
+                                Arc::new(bytecode)
                             },
                             exception_table_length: {
                                 exception_table_len = rdr.read_u16::<BigEndian>()?;
@@ -865,15 +874,15 @@ pub mod attribute {
 
     #[derive(Debug)]
     pub struct Code {
-        //This contains the executable bytecodes of a method
+        //This contains the executable bytecode of a method
         max_stack: u16,
         max_locals: u16,
         code_length: u32,
-        pub code: Vec<u8>, //Stream of bytes
+        pub code: Arc<Vec<(Bytecode, u16)>>,
         exception_table_length: u16,
-        exception_table: Vec<CodeExceptionTable>,
+        pub exception_table: Vec<CodeExceptionTable>,
         attributes_count: u16,
-        attributes: Vec<Attribute>,
+        pub attributes: Vec<Attribute>,
     }
 
     #[derive(Debug)]
@@ -1025,9 +1034,9 @@ pub mod attribute {
 }
 
 pub mod constant {
-    use crate::vm::class::{ConstantPool, ParseError};
     use byteorder::{BigEndian, ReadBytesExt};
     use std::io::{Read, Seek};
+    use crate::class::{ConstantPool, ParseError};
 
     //https://docs.oracle.com/javase/specs/jvms/se7/html/jvms-4.html#jvms-4.4
     #[repr(u8)]

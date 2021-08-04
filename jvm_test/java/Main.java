@@ -25,6 +25,7 @@ public class Main {
         String string = new String(chars);
 
         print_string(string);
+        print_int(chars.length);
     }
 
     public static void main1(String[] str) {

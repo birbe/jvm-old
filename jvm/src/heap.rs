@@ -1,5 +1,3 @@
-use crate::vm::class::{Class, FieldDescriptor, JavaType};
-use crate::vm::vm::{JvmError, Operand, OperandType};
 use std::alloc::{Layout, dealloc};
 use std::collections::HashMap;
 use std::convert::TryInto;
@@ -11,6 +9,8 @@ use std::alloc::alloc;
 use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
+use crate::class::{Class, FieldDescriptor, JavaType};
+use crate::{JvmError, Operand, OperandType};
 
 pub struct Heap {
     pub strings: RwLock<HashMap<String, usize>>,

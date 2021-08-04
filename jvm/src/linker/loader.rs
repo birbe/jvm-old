@@ -1,22 +1,18 @@
-use crate::vm::class::attribute::Attribute;
-use crate::vm::class::constant::Constant;
-use crate::vm::class::FieldDescriptor;
-use crate::vm::class::{
-    Class, ConstantPool, FieldInfo, JavaType, Method, MethodDescriptor, MethodReturnType,
-    ObjectField,
-};
 use byteorder::{BigEndian, ReadBytesExt};
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-
 use std::iter::FromIterator;
-use std::ops::Deref;
-
-use crate::vm::vm::JvmError;
 use std::io;
 use std::mem::size_of;
 use std::sync::Arc;
+use crate::class::{Class, FieldDescriptor, Method, ConstantPool, ObjectField, FieldInfo, JavaType};
+use crate::JvmError;
+use std::ops::Deref;
+use crate::class::constant::Constant;
+use crate::class::attribute::Attribute;
 
+///A trait that provides classes to a VirtualMachine. It is up to the user to implement this.
+///An example of this would be a file-system backed implementation.
 pub trait ClassProvider: Send + Sync {
     fn get_classfile(&self, classpath: &str) -> Option<&[u8]>;
 }
@@ -58,8 +54,7 @@ pub struct ClassLoadReport {
 
 pub struct ClassLoader {
     pub class_map: HashMap<String, ClassLoadState>,
-
-    class_provider: Box<dyn ClassProvider>,
+    pub class_provider: Box<dyn ClassProvider>,
 }
 
 impl ClassLoader {
@@ -96,24 +91,24 @@ impl ClassLoader {
         })
     }
 
-    fn handle_load_link_fd(&mut self, fd: &FieldDescriptor, classes: &mut HashSet<Arc<Class>>) -> Result<(), JvmError> {
-        match self.load_link_field_descriptor(fd) {
-            Ok(opt) =>
-                match opt {
-                    None => {}
-                    Some(report) => classes.extend(report.all_loaded_classes.into_iter()),
-                },
-            Err(err) => match err {
-                JvmError::ClassLoadError(class_load_err) => match class_load_err {
-                    ClassLoadState::Loading | ClassLoadState::Loaded(_) => {},
-                    _ => return Result::Err(JvmError::ClassLoadError(class_load_err))
-                },
-                _ => return Result::Err(err)
-            }
-        }
-
-        Result::Ok(())
-    }
+    // fn handle_load_link_fd(&mut self, fd: &FieldDescriptor, classes: &mut HashSet<Arc<Class>>) -> Result<(), JvmError> {
+    //     match self.load_link_field_descriptor(fd) {
+    //         Ok(opt) =>
+    //             match opt {
+    //                 None => {}
+    //                 Some(report) => classes.extend(report.all_loaded_classes.into_iter()),
+    //             },
+    //         Err(err) => match err {
+    //             JvmError::ClassLoadError(class_load_err) => match class_load_err {
+    //                 ClassLoadState::Loading | ClassLoadState::Loaded(_) => {},
+    //                 _ => return Result::Err(JvmError::ClassLoadError(class_load_err))
+    //             },
+    //             _ => return Result::Err(err)
+    //         }
+    //     }
+    //
+    //     Result::Ok(())
+    // }
 
     fn handle_class_report(&mut self, classpath: &str, classes: &mut HashSet<Arc<Class>>) -> Result<(), JvmError> {
         match self.load_and_link_class(classpath) {
@@ -132,6 +127,7 @@ impl ClassLoader {
         Result::Ok(())
     }
 
+    ///Load a class and it's superclasses
     pub fn load_and_link_class(&mut self, classpath: &str) -> Result<ClassLoadReport, JvmError> {
         let class_load_state = self.class_map.get(classpath);
         let mut all_loaded_classes = HashSet::new();
@@ -180,61 +176,6 @@ impl ClassLoader {
                 class.full_heap_size = class.heap_size + superclass.full_heap_size;
             }
         }
-
-        // for constant in class.constant_pool.get_vec().iter() {
-        //     match constant {
-        //         Constant::Class(utf8) => {
-        //             let name = class.constant_pool.resolve_utf8(*utf8).unwrap();
-        //             self.handle_class_report(name, &mut all_loaded_classes)?;
-        //         }
-        //         Constant::FieldRef(class_name, name_and_type) => {
-        //             self.handle_class_report(
-        //                 class.constant_pool.resolve_class_info(*class_name).unwrap(),
-        //                 &mut all_loaded_classes
-        //             )?;
-        //
-        //             let (_, descriptor) = class
-        //                 .constant_pool
-        //                 .resolve_name_and_type(*name_and_type)
-        //                 .unwrap();
-        //             let fd = FieldDescriptor::parse(descriptor)?;
-        //
-        //             self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
-        //         }
-        //         Constant::MethodRef(class_name, name_and_type) => {
-        //             self.handle_class_report(
-        //                 class.constant_pool.resolve_class_info(*class_name).unwrap(),
-        //                 &mut all_loaded_classes
-        //             )?;
-        //
-        //             let (_, descriptor) = class
-        //                 .constant_pool
-        //                 .resolve_name_and_type(*name_and_type)
-        //                 .unwrap();
-        //             let md = MethodDescriptor::parse(descriptor)?;
-        //
-        //             match md.return_type {
-        //                 MethodReturnType::Void => {}
-        //                 MethodReturnType::FieldDescriptor(fd) => {
-        //                     self.handle_load_link_fd(&fd, &mut all_loaded_classes)?;
-        //                 }
-        //             }
-        //
-        //             md.parameters.iter().
-        //                 map(|param| {
-        //                     self.handle_load_link_fd(param, &mut all_loaded_classes)?;
-        //                     Result::Ok(())
-        //                 })
-        //                 .collect::<Result<Vec<()>, JvmError>>()?;
-        //         }
-        //         Constant::InterfaceMethodRef(_, _) => {}
-        //         Constant::NameAndType(_, _) => {}
-        //         Constant::MethodHandle(_, _) => {}
-        //         Constant::MethodType(_) => {}
-        //         Constant::InvokeDynamic(_, _) => {}
-        //         _ => {}
-        //     }
-        // }
 
         self.class_map.insert(
             String::from(classpath),

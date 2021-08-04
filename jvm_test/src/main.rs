@@ -1,9 +1,4 @@
-use jvm::vm::vm::{VirtualMachine, JvmError};
-
 use clap::{App, Arg};
-use jvm::vm::class::constant::Constant;
-use jvm::vm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
-use jvm::vm::linker::loader::ClassProvider;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, mpsc};
 use std::{thread, io};
@@ -12,14 +7,17 @@ use tui::layout::{Layout, Direction, Constraint};
 use tui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use tui::backend::TermionBackend;
 use termion::raw::IntoRawMode;
-use tui::text::{Span, Spans, Text};
+use tui::text::{Span, Spans};
 use tui::style::{Style, Color};
 use termion::input::TermRead;
-use jvm::vm::vm::bytecode::Bytecode;
 use termion::event::Key;
 use std::process::exit;
 use std::io::{Write, stdout, Cursor};
-use std::ops::Deref;
+use jvm::class::{ClassBuilder, MethodBuilder, MethodDescriptor};
+use jvm::class::constant::Constant;
+use jvm::bytecode::Bytecode;
+use jvm::linker::loader::ClassProvider;
+use jvm::{VirtualMachine, JvmError};
 
 fn main() {
     let app = App::new("Rust JVM Test")
@@ -42,8 +40,6 @@ fn main() {
             run_vm();
         }
         "serialization" => {
-            use jvm::vm::vm::bytecode::Bytecode;
-
             let mut class_builder = ClassBuilder::new(String::from("Main"), Option::None);
             let mut method_builder = MethodBuilder::new(
                 String::from("main"),
@@ -237,25 +233,19 @@ fn stepper() {
 
         let frame = thread.get_frames().last().unwrap().read().unwrap();
 
-        let instructions = frame.get_code_cursor().get_ref();
-        let mut instruction_items = Vec::new();
-
-        //Bad to do this over and over but who cares I'll refactor it later
-        let bytecodes = Bytecode::from_bytes_with_indices(0, &instructions[..]).unwrap();
-
-        for (bytecode, index) in bytecodes {
+        let instruction_items: Vec<ListItem> = frame.code.iter().map(|(bytecode, offset)| {
             let mut style = Style::default();
 
-            if index == frame.get_code_cursor().position() {
+            if offset == frame.offset_bytecode_bimap.get_by_right(&frame.pc).unwrap() {
                 style = style.fg(Color::Black).bg(Color::White);
             }
 
             let span = Span::styled(
-                format!("{:?} {}", bytecode, index), style
+                format!("{:?} {}", bytecode, offset), style
             );
 
-            instruction_items.push(ListItem::new(Spans::from(span)));
-        }
+            ListItem::new(Spans::from(span))
+        }).collect();
 
         terminal.draw(|frame| {
             let main_chunks = Layout::default()
@@ -336,17 +326,5 @@ fn stepper() {
             frame.render_widget(operands_list, chunks[2]);
             frame.render_widget(stdout_paragraph, main_chunks[1]);
         }).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use jvm::vm::class::FieldDescriptor;
-
-    #[test]
-    fn descriptors() {
-        let field_descriptor_str = "Ljava/lang/String;([[[B);";
-        let field_descriptor = FieldDescriptor::parse(field_descriptor_str).unwrap();
-        assert_eq!(String::from(&field_descriptor), field_descriptor_str);
     }
 }
