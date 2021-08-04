@@ -6,7 +6,6 @@ use std::ptr;
 
 use sharded_slab::Slab;
 use std::alloc::alloc;
-use std::cell::UnsafeCell;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 use crate::class::{Class, FieldDescriptor, JavaType};
@@ -18,7 +17,7 @@ pub struct Heap {
     pub arrays: Slab<*mut ArrayHeader>,
 
     //TODO: this is not okay!
-    pub static_field_map: UnsafeCell<HashMap<(String, String), *mut u8>>, //TODO: &(String, String) for lookups sucks
+    pub static_field_map: RwLock<HashMap<(String, String), *mut u8>>, //TODO: &(String, String) for lookups sucks
 }
 
 // pub struct RawHeap {
@@ -34,7 +33,7 @@ impl Heap {
             strings: RwLock::new(HashMap::new()),
             objects: Slab::new(),
             arrays: Slab::new(),
-            static_field_map: UnsafeCell::new(HashMap::new()),
+            static_field_map: RwLock::new(HashMap::new()),
         }
     }
 
@@ -163,9 +162,7 @@ impl Heap {
         }
     }
 
-    /// # Safety
-    /// Must not be threaded probably
-    pub unsafe fn put_static<T: Debug>(
+    pub fn put_static<T: Debug>(
         &self,
         class: &str,
         field_name: &str,
@@ -173,29 +170,37 @@ impl Heap {
         value: T,
     ) {
         let key = &(String::from(class), String::from(field_name));
+
+        let mut static_field_map = self.static_field_map
+            .write()
+            .unwrap();
+
         unsafe {
-            let ptr = if !(*self.static_field_map.get()).contains_key(key) {
+            let ptr = if !static_field_map.contains_key(key) {
                 let size = match field_descriptor {
                     FieldDescriptor::JavaType(bt) => bt.size_of(),
                     _ => size_of::<usize>(),
                 };
 
                 let ptr = self.allocate(size);
-                (*self.static_field_map.get())
+                static_field_map
                     .insert((String::from(class), String::from(field_name)), ptr);
                 ptr
             } else {
-                *(*self.static_field_map.get()).get(key).unwrap()
+                *static_field_map.get(key).unwrap()
             } as *mut T;
 
             *ptr = value;
         }
     }
-    /// # Safety
-    /// Nothing can be writing
-    pub unsafe fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
+
+    pub fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
+        let static_field_map = self.static_field_map
+            .read()
+            .unwrap();
+
         unsafe {
-            (*self.static_field_map.get())
+            static_field_map
                 .get(&(String::from(class), String::from(field_name)))
                 .map(|&ptr| *(ptr as *mut T))
         }
