@@ -4,7 +4,7 @@ pub mod linker;
 pub mod thread;
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, PoisonError, RwLockWriteGuard, RwLockReadGuard};
+use std::sync::Arc;
 use crate::linker::loader::{ClassLoader, ClassProvider, ClassLoadState, DeserializationError};
 use crate::heap::{Heap, InternArrayType, Type, Reference};
 use std::io::{Write};
@@ -13,6 +13,7 @@ use crate::class::{JavaType, ClassError, ParseError};
 use std::iter::FromIterator;
 use std::fmt::{Debug};
 use crate::thread::RuntimeThread;
+use parking_lot::RwLock;
 
 pub struct VirtualMachine<Stdout: Write + Send + Sync> {
     pub threads: HashMap<String, Arc<RwLock<RuntimeThread<Stdout>>>>,
@@ -48,7 +49,7 @@ impl<Stdout: Write + Send + Sync> VirtualMachine<Stdout> {
         method_descriptor: &str,
         args: Vec<String>,
     ) -> Result<Arc<RwLock<RuntimeThread<Stdout>>>, JvmError> {
-        let mut class_loader = self.class_loader.write()?;
+        let mut class_loader = self.class_loader.write();
         let class_load_report = class_loader.load_and_link_class(classpath)?;
 
         let mut thread = RuntimeThread::new(
@@ -331,45 +332,8 @@ pub enum JvmError {
     InvalidObjectReference,
     MethodError(MethodError),
     UnresolvedSuper,
-    PoisonedMutex(PoisonedMutexError),
     InvalidObjectField(String),
     HeapFull,
-}
-
-impl<'a> From<PoisonError<RwLockWriteGuard<'a, ClassLoader>>> for JvmError {
-    fn from(_: PoisonError<RwLockWriteGuard<'a, ClassLoader>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Classloader)
-    }
-}
-
-impl<'a> From<PoisonError<RwLockReadGuard<'a, ClassLoader>>> for JvmError {
-    fn from(_: PoisonError<RwLockReadGuard<'a, ClassLoader>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Classloader)
-    }
-}
-
-impl<'a> From<PoisonError<RwLockWriteGuard<'a, Heap>>> for JvmError {
-    fn from(_: PoisonError<RwLockWriteGuard<'a, Heap>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Heap)
-    }
-}
-
-impl<'a> From<PoisonError<RwLockReadGuard<'a, Heap>>> for JvmError {
-    fn from(_: PoisonError<RwLockReadGuard<'a, Heap>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Heap)
-    }
-}
-
-impl<'a> From<PoisonError<RwLockWriteGuard<'a, HashMap<String, usize>>>> for JvmError {
-    fn from(_: PoisonError<RwLockWriteGuard<'a, HashMap<String, usize>>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Heap)
-    }
-}
-
-impl<'a> From<PoisonError<RwLockReadGuard<'a, HashMap<String, usize>>>> for JvmError {
-    fn from(_: PoisonError<RwLockReadGuard<'a, HashMap<String, usize>>>) -> Self {
-        Self::PoisonedMutex(PoisonedMutexError::Heap)
-    }
 }
 
 impl From<std::io::Error> for JvmError {

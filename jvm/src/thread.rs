@@ -1,5 +1,4 @@
 use crate::heap::{Heap, Type, Reference, InternArrayType, JString};
-use std::sync::{Arc, RwLock};
 use crate::linker::loader::{ClassLoader, ClassLoadState};
 use std::ops::DerefMut;
 use crate::class::{Method, Class, ClassError, MethodDescriptor, AccessFlags};
@@ -18,6 +17,8 @@ use crate::MethodError;
 use std::time::{UNIX_EPOCH, SystemTime};
 
 use std::io::Write;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 pub struct Frame {
     pub local_vars: LocalVariableMap,
@@ -68,13 +69,13 @@ macro_rules! lazy_class_resolve {
             use crate::linker::loader::ClassLoadReport;
             use std::collections::HashSet;
 
-            let classloader_read = $classloader_rw.read()?;
+            let classloader_read = $classloader_rw.read();
 
             match classloader_read.get_class($classname) {
                 None => {
                     drop(classloader_read);
                     $classloader_rw
-                        .write()?
+                        .write()
                         .load_and_link_class($classname)?
                 }
                 Some(class) => {
@@ -188,8 +189,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
             .frame_stack
             .last()
             .ok_or(JvmError::EmptyFrameStack)?
-            .write()
-            .unwrap();
+            .write();
 
         let frame = frame_write.deref_mut();
 
@@ -257,7 +257,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                             .resolve_utf8(*str_index)
                             .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
 
-                        let string_map_read = self.heap.strings.read()?;
+                        let string_map_read = self.heap.strings.read();
 
                         match string_map_read.get(string) {
                             None => {
@@ -266,7 +266,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                                 let string_reference = self.heap.create_string(
                                     string,
                                     self.classloader
-                                        .read()?
+                                        .read()
                                         .get_class("java/lang/String")
                                         .ok_or(JvmError::ClassLoadError(
                                             ClassLoadState::NotLoaded,
@@ -275,7 +275,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                                 self.heap
                                     .strings
-                                    .write()?
+                                    .write()
                                     .insert(String::from(string), string_reference);
 
                                 frame.op_stack.push(Operand(
@@ -613,8 +613,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                     .frame_stack
                     .last()
                     .ok_or(JvmError::EmptyOperandStack)?
-                    .write()
-                    .unwrap();
+                    .write();
                 invoker.op_stack.push(op);
             }
             //areturn
@@ -626,8 +625,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                     .frame_stack
                     .last()
                     .ok_or(JvmError::EmptyOperandStack)?
-                    .write()
-                    .unwrap();
+                    .write();
                 invoker.op_stack.push(op);
             }
             Bytecode::Return => { //return void
@@ -1032,7 +1030,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                     if !polymorphic {
                         let (resolved_class, method_to_invoke) = self
                             .classloader
-                            .read()?
+                            .read()
                             .recurse_resolve_overridding_method(
                                 object_info.class.clone(),
                                 &method.name,
@@ -1077,7 +1075,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                     let method_class = &class_load_report.class;
 
-                    let classloader = self.classloader.read()?;
+                    let classloader = self.classloader.read();
 
                     //TODO: clean this up, this sucks
                     let resolved_method =
@@ -1179,7 +1177,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                                     let mut string: String = jstring.into();
                                     string.push('\n');
 
-                                    self.std_out.write().unwrap().write(string.as_bytes()).unwrap();
+                                    self.std_out.write().write(string.as_bytes()).unwrap();
                                 } else {
                                     return Result::Err(JvmError::InvalidObjectReference) //Shouldn't happen
                                 }

@@ -7,9 +7,10 @@ use std::ptr;
 use sharded_slab::Slab;
 use std::alloc::alloc;
 use std::fmt::Debug;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use crate::class::{Class, FieldDescriptor, JavaType};
 use crate::{JvmError, Operand, OperandType};
+use parking_lot::RwLock;
 
 pub struct Heap {
     pub strings: RwLock<HashMap<String, usize>>,
@@ -40,7 +41,7 @@ impl Heap {
     ///Allocates a java/lang/String object onto the heap, allocates a char[], and inserts
     ///the char[] into the chars field of the String object, returning the object reference
     pub fn create_string(&self, string: &str, str_class: Arc<Class>) -> Result<usize, JvmError> {
-        let mut strings = self.strings.write()?;
+        let mut strings = self.strings.write();
 
         if strings.contains_key(string) {
             return Result::Ok(*strings.get(string).unwrap());
@@ -172,8 +173,7 @@ impl Heap {
         let key = &(String::from(class), String::from(field_name));
 
         let mut static_field_map = self.static_field_map
-            .write()
-            .unwrap();
+            .write();
 
         unsafe {
             let ptr = if !static_field_map.contains_key(key) {
@@ -196,8 +196,7 @@ impl Heap {
 
     pub fn get_static<T: Copy>(&self, class: &str, field_name: &str) -> Option<T> {
         let static_field_map = self.static_field_map
-            .read()
-            .unwrap();
+            .read();
 
         unsafe {
             static_field_map

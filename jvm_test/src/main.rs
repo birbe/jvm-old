@@ -1,6 +1,6 @@
 use clap::{App, Arg};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{Arc, mpsc, RwLock};
 use std::{thread, io};
 use tui::Terminal;
 use tui::layout::{Layout, Direction, Constraint};
@@ -117,7 +117,6 @@ fn create_vm<Stdout: Write + Send + Sync>(stdout: Stdout) -> Arc<RwLock<VirtualM
         )
     );
 
-
     {
         let mut vm = vm.write().unwrap();
 
@@ -151,7 +150,7 @@ fn run_vm() {
 
     let handle1 = thread::spawn(move || {
         let jvm = vm1.read().unwrap();
-        let mut thread = jvm.threads.get("thread 1").unwrap().write().unwrap();
+        let mut thread = jvm.threads.get("thread 1").unwrap().write();
 
         while thread.get_stack_count() > 0 {
             match thread.step() {
@@ -165,7 +164,7 @@ fn run_vm() {
 
     let handle2 = thread::spawn(move || {
         let jvm = vm2.read().unwrap();
-        let mut thread = jvm.threads.get("thread 2").unwrap().write().unwrap();
+        let mut thread = jvm.threads.get("thread 2").unwrap().write();
 
         while thread.get_stack_count() > 0 {
             match thread.step() {
@@ -211,7 +210,7 @@ fn stepper() {
         let vm_write = vm.read().unwrap();
 
         let thread_rw = vm_write.get_thread("thread 1").unwrap();
-        let mut thread = thread_rw.write().unwrap();
+        let mut thread = thread_rw.write();
 
         match key {
             Key::Char('\n') => {
@@ -231,7 +230,7 @@ fn stepper() {
             exit(0);
         }
 
-        let frame = thread.get_frames().last().unwrap().read().unwrap();
+        let frame = thread.get_frames().last().unwrap().read();
 
         let instruction_items: Vec<ListItem> = frame.code.iter().map(|(bytecode, offset)| {
             let mut style = Style::default();
@@ -284,7 +283,7 @@ fn stepper() {
 
             let frame_stack_list = List::new(
                 thread.get_frames().iter().rev().map(|frame| {
-                    let frame_read = frame.read().unwrap();
+                    let frame_read = frame.read();
 
                     let name = format!("{}#{}", frame_read.get_class().this_class, frame_read.get_method_name());
 
@@ -299,7 +298,7 @@ fn stepper() {
                 .borders(Borders::ALL);
 
             let operands_list = List::new(
-                thread.get_frames().last().unwrap().read().unwrap().get_operand_stack().iter().rev().map(|&op| {
+                thread.get_frames().last().unwrap().read().get_operand_stack().iter().rev().map(|&op| {
                     ListItem::new(Spans::from(
                         Span::styled(format!("{:?}", op), Style::default())
                     ))
@@ -311,7 +310,7 @@ fn stepper() {
                 .borders(Borders::ALL);
 
             let stdout_arc = vm_write.get_stdout();
-            let stdout_read = stdout_arc.read().unwrap();
+            let stdout_read = stdout_arc.read();
 
             let stdout_paragraph = Paragraph::new(
                 Spans::from(
