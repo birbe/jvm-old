@@ -124,6 +124,7 @@ impl Heap {
             let header = ptr.cast::<ArrayHeader>();
             (*header).id = id;
             (*header).size = body_size.try_into().unwrap();
+            (*header).length = length;
             (*header).body = ptr.offset(offset.try_into().unwrap());
             (*header).full_size = layout.size();
 
@@ -137,8 +138,7 @@ impl Heap {
     /// ptr must be a *mut ArrayHeader with all the field filled out accurately.
     pub unsafe fn get_array<T>(ptr: *mut u8) -> (*mut ArrayHeader, *mut T) {
         let header_ptr = ptr.cast::<ArrayHeader>();
-        // let body_ptr = header_ptr.offset(size_of::<ArrayHeader<T>>() as isize).cast::<T>();
-        let body_ptr = unsafe { (*header_ptr).body.cast::<T>() };
+        let body_ptr = (*header_ptr).body.cast::<T>();
 
         (header_ptr, body_ptr)
     }
@@ -249,6 +249,7 @@ pub enum InternArrayType {
 pub struct ArrayHeader {
     pub id: u8,
     pub size: u32,
+    pub length: u32,
     pub body: *mut u8,
     pub full_size: usize
 }

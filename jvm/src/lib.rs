@@ -88,8 +88,6 @@ impl<Stdout: Write + Send + Sync> VirtualMachine<Stdout> {
                         .load_and_link_class("java/lang/String")?.class
                 )?;
 
-                dbg!(allocated_string);
-
                 unsafe {
                     *body.offset(index.try_into().unwrap()) = allocated_string as usize;
                 }

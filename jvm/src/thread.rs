@@ -1,7 +1,7 @@
 use crate::heap::{Heap, Type, Reference, InternArrayType, JString};
 use crate::linker::loader::{ClassLoader, ClassLoadState};
 use std::ops::DerefMut;
-use crate::class::{Method, Class, ClassError, MethodDescriptor, AccessFlags};
+use crate::class::{Method, Class, ClassError, MethodDescriptor, AccessFlags, ConstantPool};
 use crate::class::attribute::AttributeItem;
 use std::fmt::{Debug, Formatter};
 use crate::class::constant::Constant;
@@ -94,11 +94,13 @@ macro_rules! lazy_class_resolve {
 ///Initializes classes whenever necessary
 ///This macro will step the instruction counter backwards if static(s) were loaded
 ///
+///The operand stack should be unchanged at all times before this macro is invoked.
+///
 /// ```Rust
-/// let was_initialized = init_static!(frame, frame_borrow, 3, class_load_report, self.frame_stack, { code });
+/// init_static!(frame, frame_borrow, class_load_report, self.frame_stack, { code });
 /// ```
 macro_rules! init_static {
-    ($frame:ident, $frame_borrow:ident, $bytecode_len:literal, $class_load_report:ident, $frame_stack:expr, $stdout:ident, $body:block) => {
+    ($frame:ident, $frame_borrow:ident, $class_load_report:ident, $frame_stack:expr, $stdout:ident, $body:block) => {
         {
             let statics_to_init: Vec<Arc<Class>> = $class_load_report.all_loaded_classes.iter().filter(|&class|
                         class.has_method("<clinit>", "()V")
@@ -495,8 +497,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                     ],
                 );
             }
-            //astore_<n>
-            Bytecode::Astore_n(local) => {
+            Bytecode::Astore_n(local) | Bytecode::Astore(local) => {
                 let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
 
                 frame
@@ -642,7 +643,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, &class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
                     let fd = FieldDescriptor::parse(field.descriptor)?;
 
                     let class = &class_load_report.class;
@@ -784,7 +785,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, field.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
                     let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                     let fd = FieldDescriptor::parse(field.descriptor)?;
 
@@ -909,7 +910,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, fieldref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
                     let value = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
                     let object_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?.1;
 
@@ -927,7 +928,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
 
                     let class = class_load_report.class;
 
@@ -1071,7 +1072,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
 
                     let method_class = &class_load_report.class;
 
@@ -1084,7 +1085,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                     let to_invoke: (Arc<Class>, Arc<Method>) = if (method_class.access_flags & 0x20
                         == 0x20)
                         && classloader
-                            .recurse_is_superclass(frame.class.as_ref(), &method_class.this_class)
+                            .recurse_is_superclass(frame.class.clone(), method_class.clone())
                         && resolved_method.name != "<init>"
                     {
                         classloader
@@ -1139,7 +1140,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, method_ref.class_name);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
 
                     let class = &class_load_report.class;
 
@@ -1248,7 +1249,7 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
 
                 let class_load_report = lazy_class_resolve!(self.classloader, classpath);
 
-                init_static!(frame, frame_write, 3, class_load_report, self.frame_stack, Stdout, {
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
                     //TODO: there's probably some type checking and rules that need to be followed here
 
                     let id = self.heap.create_object(class_load_report.class.clone())?;
@@ -1277,7 +1278,60 @@ impl<Stdout: Write + Send + Sync> RuntimeThread<Stdout> {
                 frame
                     .op_stack
                     .push(Operand(OperandType::ArrayReference, ptr as usize));
-            }
+            },
+            Bytecode::Checkcast(index) => {
+                let class_name = frame.class.constant_pool
+                    .resolve_class_info(*index)
+                    .ok_or(JvmError::ClassError(ClassError::ConstantNotFound))?;
+
+                let class_load_report = lazy_class_resolve!(self.classloader, class_name);
+
+                init_static!(frame, frame_write, class_load_report, self.frame_stack, Stdout, {
+                    let object_ref = frame.op_stack
+                        .pop()
+                        .ok_or(JvmError::EmptyOperandStack)?;
+
+                    if matches!(object_ref.0, OperandType::NullReference) {
+                        return Result::Ok(()); //Operand stack is unchanged if the object reference is null
+                    }
+
+                    match object_ref.0 {
+                        OperandType::InterfaceReference | OperandType::ClassReference => {
+                            let object = self.heap.objects.get(object_ref.1).unwrap();
+
+                            let t_class = class_load_report.class;
+                            let s_class = object.class.clone();
+
+                            let can_cast = self.classloader.read().check_cast(s_class, t_class);
+
+                            if can_cast {
+                                frame.op_stack.push(object_ref);
+                            } else {
+                                unimplemented!();
+                            }
+                        },
+                        OperandType::ArrayReference => {
+                            unimplemented!()
+                        },
+                        _ => unreachable!()
+                    }
+
+                });
+            },
+            Bytecode::Arraylength => {
+                let array_ref = frame.op_stack.pop().ok_or(JvmError::EmptyOperandStack)?;
+
+                if matches!(array_ref.0, OperandType::NullReference) {
+                    unimplemented!("NullPointerException");
+                }
+
+                //The type of the array doesn't actually matter here as we just need the length,
+                //which is located in the ArrayHeader which is independent of the type.
+                let (header, _) = unsafe { Heap::get_array::<usize>(array_ref.1 as *mut u8) };
+                let length = unsafe { (*header).length };
+
+                frame.op_stack.push(Operand(OperandType::Int, length as usize));
+            },
             _ => {
                 unimplemented!(
                     "\n\nOpcode: {:?}\nClass: {}\nMethod: {}\nIndex: {}\n\n",

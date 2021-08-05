@@ -5,7 +5,7 @@ use std::iter::FromIterator;
 use std::io;
 use std::mem::size_of;
 use std::sync::Arc;
-use crate::class::{Class, FieldDescriptor, Method, ConstantPool, ObjectField, FieldInfo, JavaType};
+use crate::class::{Class, FieldDescriptor, Method, ConstantPool, ObjectField, FieldInfo, JavaType, AccessFlags};
 use crate::JvmError;
 use std::ops::Deref;
 use crate::class::constant::Constant;
@@ -208,22 +208,16 @@ impl ClassLoader {
         })
     }
 
-    //TODO: cleanup
-    pub fn recurse_is_superclass(&self, subclass: &Class, superclass_cpath: &str) -> bool {
-        if subclass.this_class == superclass_cpath {
-            false
-        } else if (superclass_cpath == "java/lang/Object"
-            && subclass.this_class != "java/lang/Object")
-            || (subclass.super_class.as_deref().unwrap_or("") == superclass_cpath)
-        {
+    pub fn recurse_is_superclass(&self, subclass: Arc<Class>, superclass: Arc<Class>) -> bool {
+        if subclass == superclass {
             true
-        } else if subclass.super_class.as_deref().unwrap_or("") == "java/lang/Object"
-            && superclass_cpath != "java/lang/Object"
-        {
+        } else if superclass.this_class == "java/lang/Object" {
+            true
+        } else if subclass.this_class == "java/lang/Object" {
             false
         } else {
-            let superclass = self.get_class(subclass.super_class.as_deref().unwrap()).unwrap();
-            self.recurse_is_superclass(superclass.as_ref(), superclass_cpath)
+            let superclass_of_subclass = self.get_class(subclass.super_class.as_deref().unwrap()).unwrap();
+            self.recurse_is_superclass(superclass_of_subclass, superclass)
         }
     }
 
@@ -275,6 +269,63 @@ impl ClassLoader {
         } else {
             self.recurse_resolve_supermethod_special(superclass, name, descriptor)
         }
+    }
+
+    fn does_interface_implement_interface(&self, sub_interface: Arc<Class>, super_interface: Arc<Class>) -> bool {
+        //Speaks for itself
+        if sub_interface == super_interface {
+            true
+        } else if sub_interface.super_class.as_deref().unwrap() == super_interface.this_class {
+            //If the subclass extends the superclass
+            true
+        } else {
+            //Get the implemented interfaces of the subclass
+            let interfaces = &sub_interface.interfaces;
+
+            for class_index in interfaces {
+                let implementing_name = sub_interface.constant_pool
+                    .resolve_class_info(*class_index)
+                    .unwrap();
+
+                let implementing = self.get_class(implementing_name)
+                    .unwrap();
+
+                //Resolve the classes
+
+                if implementing == super_interface {
+                    return true;
+                } else {
+                    //Recursively check if it's implemented
+                    if self.does_interface_implement_interface(
+                        implementing.clone(),
+                        super_interface.clone())
+                        | self.recurse_is_superclass(
+                        implementing.clone(),
+                        super_interface.clone()) {
+
+                        return true;
+                    }
+                }
+            }
+
+            false
+        }
+    }
+
+    pub fn check_cast(
+        &self,
+        s_class: Arc<Class>,
+        t_class: Arc<Class>
+    ) -> bool {
+        //If S is an interface class
+        if s_class.access_flags & AccessFlags::INTERFACE.bits() == AccessFlags::INTERFACE.bits() {
+            return self.does_interface_implement_interface(t_class, s_class)
+        } else {
+            //S is a normal class
+            return self.recurse_is_superclass(t_class, s_class);
+        }
+
+        false
     }
 }
 

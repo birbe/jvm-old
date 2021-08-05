@@ -15,8 +15,8 @@ use crate::bytecode::Bytecode;
 use crate::OperandType;
 
 #[derive(Debug)]
+///A parsed classfile
 pub struct Class {
-    //Parsed info from the .class file
     pub constant_pool: ConstantPool,
     pub access_flags: u16,
     pub this_class: String,
@@ -25,9 +25,10 @@ pub struct Class {
     pub field_map: HashMap<String, ObjectField>,
     pub method_map: HashMap<(String, String), Arc<Method>>,
     pub attribute_map: HashMap<String, Attribute>,
+    ///Size of this class' fields
     pub heap_size: usize,
-    pub full_heap_size: usize, //Heap size of this class plus the superclass
-                               //Dynamically sized, heap allocated vector of heap allocated Info instances blah blah blah
+    ///heap_size of this class' fields + heap_size of the superclass' fields
+    pub full_heap_size: usize,
 }
 
 impl PartialEq for Class {
@@ -316,6 +317,7 @@ bitflags! {
         const BRIDGE       = 0x40;
         const VARARGS      = 0x80;
         const NATIVE       = 0x100;
+        const INTERFACE    = 0x200;
         const ABSTRACT     = 0x400;
         const STRICT       = 0x800;
         const SYNTHETIC    = 0x1000;

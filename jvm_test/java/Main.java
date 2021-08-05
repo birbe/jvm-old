@@ -17,15 +17,12 @@ public class Main {
     }
 
     public static void main(String[] strings) {
-        print_string("i løve møøse");
-
-        char[] chars = new char[2];
-        chars[0] = 'h';
-        chars[1] = 'i';
-        String string = new String(chars);
-
-        print_string(string);
-        print_int(chars.length);
+        //Cast test, this should work
+        String string = "Hello world!";
+        Object string_object = (Object) string;
+        String string_from_cast = (String) string_object;
+        //Fail
+        Main fail_cast = (Main) string_object;
     }
 
     public static void main1(String[] str) {
