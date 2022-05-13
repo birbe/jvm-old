@@ -2,7 +2,7 @@
 
 ![badge](https://img.shields.io/badge/version-0.1.0-f39f37) ![Rust](https://github.com/Birbe/jvm/workflows/Rust/badge.svg)
 
-### Warning! This crate is absurdly unsafe at the moment.
+### Warning! This crate is unsafe at the moment.
 
 ___
 
